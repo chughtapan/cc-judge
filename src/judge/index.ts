@@ -1,10 +1,17 @@
 // JudgeBackend interface + bundled AnthropicJudgeBackend.
-// Responsibility: score (scenario, turns, diff?) into a JudgeResult.
-// Invariant #3: judge() error channel is `never`. Internal failures fold into a critical-severity result.
+// Invariant #3: judge() error channel is `never`. Every internal failure folds
+// into a JudgeResult with pass=false, overallSeverity="critical", and the
+// retry count reflected on the record so observers can see how hard we tried.
 
-import type { Effect } from "effect";
-import type { Turn, WorkspaceDiff } from "../core/types.js";
-import type { JudgeResult, Scenario } from "../core/schema.js";
+import { Effect } from "effect";
+import { Value } from "@sinclair/typebox/value";
+import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { Turn, WorkspaceDiff, Issue, IssueSeverity } from "../core/types.js";
+import {
+  type JudgeResult,
+  type Scenario,
+  JudgeResultSchema,
+} from "../core/schema.js";
 
 export interface JudgeInput {
   readonly scenario: Scenario;
@@ -15,22 +22,379 @@ export interface JudgeInput {
 
 export interface JudgeBackend {
   readonly name: string;
-
-  // Verdict is owned here. Internal errors (network, malformed structured output,
-  // retry exhaustion) fold into a JudgeResult with pass=false, overallSeverity="critical".
   judge(input: JudgeInput): Effect.Effect<JudgeResult, never, never>;
 }
 
 export interface AnthropicJudgeBackendOpts {
-  // Spec assumption #13: default judge model is "claude-opus-4-7".
   readonly model?: string;
   readonly maxTurns?: number;
   readonly perAttemptTimeoutMs?: number;
   readonly retrySchedule?: ReadonlyArray<number>;
 }
 
-export declare class AnthropicJudgeBackend implements JudgeBackend {
-  readonly name: "anthropic";
-  constructor(opts?: AnthropicJudgeBackendOpts);
-  judge(input: JudgeInput): Effect.Effect<JudgeResult, never, never>;
+const DEFAULT_MODEL = "claude-opus-4-7";
+const DEFAULT_MAX_TURNS = 4;
+const DEFAULT_PER_ATTEMPT_TIMEOUT_MS = 120_000;
+// Exponential backoff in ms (spec assumption #15).
+const DEFAULT_RETRY_SCHEDULE: ReadonlyArray<number> = [500, 1_500, 4_500];
+
+// What we ask the judge model to emit. Kept tight so parse errors are rare.
+const JUDGE_SYSTEM_PROMPT = `You are a verdict-only evaluator. Read the scenario, the agent transcript, and the workspace diff; then emit a single JSON object and nothing else. Schema:
+{
+  "pass": boolean,
+  "reason": string,
+  "issues": [{ "issue": string, "severity": "minor" | "significant" | "critical" }],
+  "overallSeverity": "minor" | "significant" | "critical" | null,
+  "judgeConfidence": number (0-1)
+}
+Every validation check in the scenario is either met or not; list unmet checks as issues. If pass is true, issues may still list minor nits. overallSeverity is null when pass is true and no issues were listed, otherwise the most severe issue. Do not wrap the JSON in markdown fences.`;
+
+function renderDiff(diff: WorkspaceDiff | undefined): string {
+  if (diff === undefined || diff.changed.length === 0) return "(no workspace changes)";
+  const lines: string[] = [];
+  for (const c of diff.changed) {
+    if (c.before === null && c.after !== null) {
+      lines.push(`+ added ${c.path} (${c.after.length} bytes)`);
+    } else if (c.before !== null && c.after === null) {
+      lines.push(`- removed ${c.path}`);
+    } else {
+      lines.push(`~ modified ${c.path}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function renderTurns(turns: ReadonlyArray<Turn>): string {
+  const parts: string[] = [];
+  for (const t of turns) {
+    parts.push(`--- Turn ${t.index} ---`);
+    parts.push(`USER: ${t.prompt}`);
+    parts.push(`ASSISTANT: ${t.response}`);
+  }
+  return parts.join("\n");
+}
+
+function renderPrompt(input: JudgeInput): string {
+  const s = input.scenario;
+  const checks = s.validationChecks.map((c, i) => `${i + 1}. ${c}`).join("\n");
+  return [
+    `# Scenario: ${s.name}`,
+    `Description: ${s.description}`,
+    `Expected behavior: ${s.expectedBehavior}`,
+    "",
+    "Validation checks (each must hold for pass=true):",
+    checks,
+    "",
+    "# Transcript",
+    renderTurns(input.turns),
+    "",
+    "# Workspace diff",
+    renderDiff(input.workspaceDiff),
+    "",
+    "Return the JSON verdict now.",
+  ].join("\n");
+}
+
+function extractJsonText(text: string): string {
+  // The prompt says no markdown fences, but models slip. Strip a leading
+  // ```json / ``` fence pair if present. Never tries to repair the JSON body.
+  const trimmed = text.trim();
+  const fenceStart = /^```(?:json)?\s*/u;
+  const fenceEnd = /\s*```\s*$/u;
+  return trimmed.replace(fenceStart, "").replace(fenceEnd, "").trim();
+}
+
+interface RawJudgeVerdict {
+  readonly pass?: unknown;
+  readonly reason?: unknown;
+  readonly issues?: unknown;
+  readonly overallSeverity?: unknown;
+  readonly judgeConfidence?: unknown;
+}
+
+interface ParsedAssistantResult {
+  readonly text: string;
+  readonly structured: unknown;
+}
+
+function collectAssistantText(messages: ReadonlyArray<SDKMessage>): ParsedAssistantResult {
+  let text = "";
+  let structured: unknown = undefined;
+  for (const m of messages) {
+    if (m.type === "result" && m.subtype === "success") {
+      text = m.result;
+      structured = m.structured_output;
+    } else if (m.type === "assistant") {
+      const content = m.message.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (
+            typeof block === "object" &&
+            block !== null &&
+            "type" in block &&
+            (block as { type: unknown }).type === "text" &&
+            "text" in block &&
+            typeof (block as { text: unknown }).text === "string"
+          ) {
+            text += (block as { text: string }).text;
+          }
+        }
+      }
+    }
+  }
+  return { text, structured };
+}
+
+// Tagged errors used internally by the judge pipeline. None escape — they are
+// folded into a synthetic JudgeResult before leaving `judge()` (invariant #3).
+class JudgeAttemptError {
+  readonly _tag = "JudgeAttemptError" as const;
+  constructor(
+    readonly kind:
+      | "SdkFailed"
+      | "NoOutput"
+      | "MalformedJson"
+      | "SchemaInvalid"
+      | "Timeout"
+      | "ResultError",
+    readonly message: string,
+  ) {}
+}
+
+function collectSdkMessages(
+  prompt: string,
+  model: string,
+  maxTurns: number,
+  abortController: AbortController,
+): Effect.Effect<ReadonlyArray<SDKMessage>, JudgeAttemptError, never> {
+  return Effect.suspend(() => {
+    const q = query({
+      prompt,
+      options: {
+        model,
+        maxTurns,
+        abortController,
+        systemPrompt: { type: "preset", preset: "claude_code", append: JUDGE_SYSTEM_PROMPT },
+        allowDangerouslySkipPermissions: true,
+      },
+    });
+    const iter = q[Symbol.asyncIterator]();
+    const collected: SDKMessage[] = [];
+    const step: Effect.Effect<ReadonlyArray<SDKMessage>, JudgeAttemptError, never> = Effect.tryPromise({
+      try: () => iter.next(),
+      catch: (err) =>
+        new JudgeAttemptError(
+          "SdkFailed",
+          err instanceof Error ? err.message : String(err),
+        ),
+    }).pipe(
+      Effect.flatMap((r) => {
+        if (r.done === true) return Effect.succeed(collected as ReadonlyArray<SDKMessage>);
+        collected.push(r.value);
+        return step;
+      }),
+    );
+    return step;
+  });
+}
+
+function parseVerdict(parsed: ParsedAssistantResult): Effect.Effect<JudgeResult, JudgeAttemptError, never> {
+  let value: unknown;
+  if (parsed.structured !== undefined && parsed.structured !== null) {
+    value = parsed.structured;
+  } else {
+    const raw = extractJsonText(parsed.text);
+    if (raw.length === 0) {
+      return Effect.fail(new JudgeAttemptError("NoOutput", "judge model returned empty output"));
+    }
+    try {
+      value = JSON.parse(raw);
+    } catch (err) {
+      return Effect.fail(
+        new JudgeAttemptError(
+          "MalformedJson",
+          err instanceof Error ? err.message : String(err),
+        ),
+      );
+    }
+  }
+  return buildResult(value, 0);
+}
+
+function buildResult(
+  value: unknown,
+  retryCount: number,
+): Effect.Effect<JudgeResult, JudgeAttemptError, never> {
+  if (typeof value !== "object" || value === null) {
+    return Effect.fail(new JudgeAttemptError("SchemaInvalid", "verdict is not an object"));
+  }
+  const raw: RawJudgeVerdict = value;
+  const candidate = {
+    pass: typeof raw.pass === "boolean" ? raw.pass : false,
+    reason: typeof raw.reason === "string" ? raw.reason : "",
+    issues: coerceIssues(raw.issues),
+    overallSeverity: coerceSeverity(raw.overallSeverity),
+    judgeConfidence: coerceConfidence(raw.judgeConfidence),
+    retryCount,
+  };
+  const errs: string[] = [];
+  for (const e of Value.Errors(JudgeResultSchema, candidate)) {
+    errs.push(`${e.path} ${e.message}`);
+  }
+  if (errs.length > 0) {
+    return Effect.fail(new JudgeAttemptError("SchemaInvalid", errs.join("; ")));
+  }
+  const decoded = Value.Decode(JudgeResultSchema, candidate);
+  const result: JudgeResult = {
+    pass: decoded.pass,
+    reason: decoded.reason,
+    issues: decoded.issues as ReadonlyArray<Issue>,
+    overallSeverity: decoded.overallSeverity as IssueSeverity | null,
+    retryCount: decoded.retryCount,
+    ...(decoded.judgeConfidence !== undefined ? { judgeConfidence: decoded.judgeConfidence } : {}),
+  };
+  return Effect.succeed(result);
+}
+
+function coerceIssues(v: unknown): ReadonlyArray<Issue> {
+  if (!Array.isArray(v)) return [];
+  const out: Issue[] = [];
+  for (const entry of v) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e: { issue?: unknown; severity?: unknown } = entry;
+    if (typeof e.issue !== "string") continue;
+    const severity = coerceSeverity(e.severity);
+    if (severity === null) continue;
+    out.push({ issue: e.issue, severity });
+  }
+  return out;
+}
+
+function coerceSeverity(v: unknown): IssueSeverity | null {
+  if (v === "minor" || v === "significant" || v === "critical") return v;
+  return null;
+}
+
+function coerceConfidence(v: unknown): number | undefined {
+  if (typeof v !== "number" || Number.isNaN(v)) return undefined;
+  if (v < 0) return 0;
+  if (v > 1) return 1;
+  return v;
+}
+
+function sleepEff(ms: number): Effect.Effect<void, never, never> {
+  return Effect.async<void, never, never>((resume) => {
+    const t = setTimeout(() => resume(Effect.succeed(undefined)), ms);
+    return Effect.sync(() => {
+      clearTimeout(t);
+    });
+  });
+}
+
+function criticalFallback(
+  err: JudgeAttemptError,
+  retryCount: number,
+): JudgeResult {
+  const issues: ReadonlyArray<Issue> = [
+    { issue: `judge ${err.kind}: ${err.message}`, severity: "critical" },
+  ];
+  return {
+    pass: false,
+    reason: `judge could not produce a verdict (${err.kind})`,
+    issues,
+    overallSeverity: "critical",
+    retryCount,
+  };
+}
+
+function timeoutEff<A>(
+  inner: Effect.Effect<A, JudgeAttemptError, never>,
+  ms: number,
+  abortController: AbortController,
+): Effect.Effect<A, JudgeAttemptError, never> {
+  return Effect.race(
+    inner,
+    sleepEff(ms).pipe(
+      Effect.flatMap(() => {
+        abortController.abort();
+        return Effect.fail<JudgeAttemptError>(
+          new JudgeAttemptError("Timeout", `per-attempt timeout after ${ms}ms`),
+        );
+      }),
+    ),
+  );
+}
+
+function runAttempt(
+  input: JudgeInput,
+  model: string,
+  maxTurns: number,
+  timeoutMs: number,
+  parentSignal: AbortSignal | undefined,
+  attempt: number,
+): Effect.Effect<JudgeResult, JudgeAttemptError, never> {
+  const abortController = new AbortController();
+  if (parentSignal !== undefined) {
+    if (parentSignal.aborted) abortController.abort();
+    else parentSignal.addEventListener("abort", () => abortController.abort(), { once: true });
+  }
+  const prompt = renderPrompt(input);
+  const collect = collectSdkMessages(prompt, model, maxTurns, abortController).pipe(
+    Effect.flatMap((messages) => {
+      for (const m of messages) {
+        if (m.type === "result" && m.subtype !== "success") {
+          return Effect.fail(
+            new JudgeAttemptError(
+              "ResultError",
+              m.errors.length > 0 ? m.errors.join("; ") : m.subtype,
+            ),
+          );
+        }
+      }
+      return parseVerdict(collectAssistantText(messages));
+    }),
+    Effect.map((r): JudgeResult => ({ ...r, retryCount: attempt })),
+  );
+  return timeoutEff(collect, timeoutMs, abortController);
+}
+
+export class AnthropicJudgeBackend implements JudgeBackend {
+  readonly name = "anthropic";
+  readonly #model: string;
+  readonly #maxTurns: number;
+  readonly #perAttemptTimeoutMs: number;
+  readonly #retrySchedule: ReadonlyArray<number>;
+
+  constructor(opts: AnthropicJudgeBackendOpts = {}) {
+    this.#model = opts.model ?? DEFAULT_MODEL;
+    this.#maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS;
+    this.#perAttemptTimeoutMs = opts.perAttemptTimeoutMs ?? DEFAULT_PER_ATTEMPT_TIMEOUT_MS;
+    this.#retrySchedule = opts.retrySchedule ?? DEFAULT_RETRY_SCHEDULE;
+  }
+
+  judge(input: JudgeInput): Effect.Effect<JudgeResult, never, never> {
+    const model = this.#model;
+    const maxTurns = this.#maxTurns;
+    const timeoutMs = this.#perAttemptTimeoutMs;
+    const schedule = this.#retrySchedule;
+
+    const loop = Effect.gen(function* () {
+      let attempt = 0;
+      let lastErr: JudgeAttemptError = new JudgeAttemptError("NoOutput", "no attempts ran");
+      while (attempt <= schedule.length) {
+        if (attempt > 0) {
+          const delay = schedule[attempt - 1] ?? 0;
+          yield* sleepEff(delay);
+        }
+        const res = yield* Effect.either(
+          runAttempt(input, model, maxTurns, timeoutMs, input.abortSignal, attempt),
+        );
+        if (res._tag === "Right") return res.right;
+        lastErr = res.left;
+        attempt += 1;
+      }
+      return criticalFallback(lastErr, attempt - 1);
+    });
+    return loop;
+  }
 }
