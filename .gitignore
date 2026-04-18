@@ -7,3 +7,6 @@ coverage/
 eval-results/
 .vitest-cache/
 /tmp/
+.stryker-tmp/
+reports/
+stryker.log

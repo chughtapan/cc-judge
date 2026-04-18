@@ -51,6 +51,16 @@ Playwright is intentionally **not** used: cc-judge is a CLI + SDK with no browse
 
 See the [design doc](https://github.com/chughtapan/cc-judge/issues/4) for the full module layout.
 
+## Mutation testing
+
+Mutation testing runs the full `src/**/*.ts` tree through [Stryker](https://stryker-mutator.io/) + `vitest` to measure how many introduced faults the test suite catches.
+
+```
+pnpm mutation
+```
+
+Config lives in `stryker.config.js`. Thresholds: break at 50, low at 60, high at 80. The TypeScript checker filters mutations that don't typecheck (expected for Effect-heavy code). HTML report lands in `reports/mutation/`. CI is non-gating.
+
 ## License
 
 MIT.
