@@ -9,6 +9,7 @@ function makeScenario(): Scenario {
     id: ScenarioId("runner-verbose-flag"),
     name: "runner-verbose-flag",
     description: "test",
+    axis: "principle-3-typed-errors",
     setupPrompt: "noop",
     expectedBehavior: "noop",
     validationChecks: [],

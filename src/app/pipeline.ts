@@ -330,10 +330,16 @@ export function scoreTraces(
 }
 
 function traceToScenario(trace: Trace): Scenario {
+  // Trace-scoring synthesizes a pseudo-Scenario so the judge interface can
+  // consume it. Traces don't carry an axis — the axis is a property of the
+  // authored scenario, not of a post-hoc trace. Default to artifact-discipline
+  // because trace scoring is "score a produced artifact," which is what that
+  // axis anchors.
   return {
     id: trace.scenarioId ?? scenarioIdFromTraceId(trace.traceId),
     name: trace.name,
     description: "",
+    axis: "artifact-discipline",
     setupPrompt: trace.turns.length > 0 ? (trace.turns[0]?.prompt ?? "") : "",
     expectedBehavior: trace.expectedBehavior,
     validationChecks: trace.validationChecks,

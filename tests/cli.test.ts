@@ -11,6 +11,7 @@ function tmpScenarioDir(): string {
 id: cli-t
 name: cli-t
 description: d
+axis: principle-3-typed-errors
 setupPrompt: p
 expectedBehavior: e
 validationChecks: [c]

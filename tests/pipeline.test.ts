@@ -77,6 +77,7 @@ function makeScenario(id: string): Scenario {
     id: ScenarioId(id),
     name: id,
     description: "test",
+    axis: "principle-3-typed-errors",
     setupPrompt: "do it",
     expectedBehavior: "does it",
     validationChecks: ["does it"],

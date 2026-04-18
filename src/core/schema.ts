@@ -75,12 +75,34 @@ export const MetadataSchema = Type.Record(
   Type.Union([Type.String(), Type.Number(), Type.Boolean()]),
 );
 
+// Axis anchors a scenario to exactly one facet of the principle suite or a
+// cross-cutting doctrinal axis. Required so reports can aggregate pass-rate
+// by axis; the 11 values are spelled out as literals so the compiler rejects
+// typos at the scenario-author boundary (Principle 1: types beat tests). The
+// values are enumerated in safer-by-default docs/specs/evals-suite-v1.md §3.
+export const AxisSchema = Type.Union([
+  Type.Literal("principle-1-types-beat-tests"),
+  Type.Literal("principle-2-validate-at-boundaries"),
+  Type.Literal("principle-3-typed-errors"),
+  Type.Literal("principle-4-exhaustiveness"),
+  Type.Literal("principle-5-junior-dev-rule"),
+  Type.Literal("principle-6-budget-gate"),
+  Type.Literal("principle-7-brake"),
+  Type.Literal("principle-8-ratchet"),
+  Type.Literal("modality-routing"),
+  Type.Literal("artifact-discipline"),
+  Type.Literal("debt-multiplier"),
+]);
+
+export type Axis = Static<typeof AxisSchema>;
+
 // YAML-shaped Scenario. Function-valued deterministic checks cannot round-trip
 // through YAML; they are TS-only. ScenarioYamlSchema is the strict decode target.
 export const ScenarioYamlSchema = Type.Object({
   id: ScenarioIdSchema,
   name: Type.String({ minLength: 1 }),
   description: Type.String(),
+  axis: AxisSchema,
   setupPrompt: Type.String({ minLength: 1 }),
   followUps: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   workspace: Type.Optional(Type.Array(WorkspaceFileSchema)),
@@ -98,6 +120,7 @@ export interface Scenario {
   readonly id: ScenarioId;
   readonly name: string;
   readonly description: string;
+  readonly axis: Axis;
   readonly setupPrompt: string;
   readonly followUps?: ReadonlyArray<string>;
   readonly workspace?: ReadonlyArray<WorkspaceFile>;

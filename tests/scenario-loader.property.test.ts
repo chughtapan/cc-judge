@@ -32,10 +32,27 @@ const maybeDirtyPathArb = fc.oneof(
   fc.stringMatching(/^[A-Za-z0-9./_-]{1,40}$/),
 );
 
+const AXES = [
+  "principle-1-types-beat-tests",
+  "principle-2-validate-at-boundaries",
+  "principle-3-typed-errors",
+  "principle-4-exhaustiveness",
+  "principle-5-junior-dev-rule",
+  "principle-6-budget-gate",
+  "principle-7-brake",
+  "principle-8-ratchet",
+  "modality-routing",
+  "artifact-discipline",
+  "debt-multiplier",
+] as const;
+type AxisLit = (typeof AXES)[number];
+const axisArb: fc.Arbitrary<AxisLit> = fc.constantFrom(...AXES);
+
 interface RawScenario {
   readonly id: string;
   readonly name: string;
   readonly description: string;
+  readonly axis: AxisLit;
   readonly setupPrompt: string;
   readonly expectedBehavior: string;
   readonly validationChecks: ReadonlyArray<string>;
@@ -46,6 +63,7 @@ const validScenarioArb: fc.Arbitrary<RawScenario> = fc.record({
   id: idArb,
   name: safeStringArb,
   description: safeStringArb,
+  axis: axisArb,
   setupPrompt: safeStringArb,
   expectedBehavior: safeStringArb,
   validationChecks: fc.array(safeStringArb, { minLength: 1, maxLength: 3 }),
@@ -62,6 +80,7 @@ describe("scenarioLoader properties", () => {
         expect(String(decoded.id)).toBe(raw.id);
         expect(decoded.name).toBe(raw.name);
         expect(decoded.description).toBe(raw.description);
+        expect(decoded.axis).toBe(raw.axis);
         expect(decoded.setupPrompt).toBe(raw.setupPrompt);
         expect(decoded.expectedBehavior).toBe(raw.expectedBehavior);
         expect([...decoded.validationChecks]).toEqual([...raw.validationChecks]);
@@ -75,6 +94,7 @@ describe("scenarioLoader properties", () => {
       id: "wp",
       name: "wp",
       description: "d",
+      axis: "principle-3-typed-errors",
       setupPrompt: "p",
       expectedBehavior: "e",
       validationChecks: ["c"],
@@ -105,6 +125,7 @@ describe("scenarioLoader properties", () => {
         const body = `id: ${id}
 name: n
 description: d
+axis: principle-3-typed-errors
 setupPrompt: p
 expectedBehavior: e
 validationChecks: [c]

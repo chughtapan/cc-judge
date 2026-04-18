@@ -22,6 +22,7 @@ const scenario: Scenario = {
   id: ScenarioId("it-docker-runner"),
   name: "integration",
   description: "",
+  axis: "principle-3-typed-errors",
   setupPrompt: "noop",
   expectedBehavior: "",
   validationChecks: ["noop"],
