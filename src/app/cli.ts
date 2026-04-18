@@ -12,6 +12,7 @@ import { AnthropicJudgeBackend } from "../judge/index.js";
 import { DockerRunner, SubprocessRunner, type AgentRunner } from "../runner/index.js";
 import { BraintrustEmitter, PromptfooEmitter, type ObservabilityEmitter } from "../emit/observability.js";
 import { getTraceAdapter, type TraceFormat } from "../emit/trace-adapter.js";
+import { RunnerResolutionError } from "../core/errors.js";
 import { runScenarios, scoreTraces } from "./pipeline.js";
 
 export type CliExitCode = 0 | 1 | 2;
@@ -68,17 +69,21 @@ function buildObservability(
   return emitters;
 }
 
-function buildRunner(args: RunCliArgs): AgentRunner {
+function buildRunner(args: RunCliArgs): Effect.Effect<AgentRunner, RunnerResolutionError, never> {
   if (args.runtime === "subprocess") {
     if (args.bin === undefined) {
-      throw new Error("--bin is required with --runtime subprocess");
+      return Effect.fail(
+        new RunnerResolutionError({ cause: { _tag: "InvalidRuntime", value: "subprocess: missing --bin" } }),
+      );
     }
-    return new SubprocessRunner({ bin: args.bin });
+    return Effect.succeed(new SubprocessRunner({ bin: args.bin }));
   }
   if (args.image === undefined) {
-    throw new Error("--image is required with --runtime docker");
+    return Effect.fail(
+      new RunnerResolutionError({ cause: { _tag: "InvalidRuntime", value: "docker: missing --image" } }),
+    );
   }
-  return new DockerRunner({ image: args.image });
+  return Effect.succeed(new DockerRunner({ image: args.image }));
 }
 
 export function runCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, never> {
@@ -89,13 +94,14 @@ export function runCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, 
       return 2 as CliExitCode;
     }
     const scenarios: ReadonlyArray<Scenario> = loadRes.right;
-    let runner: AgentRunner;
-    try {
-      runner = buildRunner(args);
-    } catch (err) {
-      process.stderr.write(`cc-judge: ${err instanceof Error ? err.message : String(err)}\n`);
+    const runnerRes = yield* Effect.either(buildRunner(args));
+    if (runnerRes._tag === "Left") {
+      const cause = runnerRes.left.cause;
+      const detail = cause._tag === "InvalidRuntime" ? cause.value : cause._tag;
+      process.stderr.write(`cc-judge: runner resolution failed: ${detail}\n`);
       return 2 as CliExitCode;
     }
+    const runner = runnerRes.right;
     const judge = new AnthropicJudgeBackend({ model: args.judge });
     const emitters = buildObservability(args.emitBraintrust, args.emitPromptfoo);
     const runRes = yield* Effect.either(

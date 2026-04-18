@@ -4,8 +4,15 @@
 
 import { Effect } from "effect";
 import type { Report, RunRecord, Scenario, Trace, JudgeResult } from "../core/schema.js";
-import type { Turn, WorkspaceDiff, IssueSeverity } from "../core/types.js";
-import { ScenarioId, RunNumber, TraceId } from "../core/types.js";
+import type {
+  Turn,
+  WorkspaceDiff,
+  IssueSeverity,
+  ScenarioId as ScenarioIdType,
+  RunNumber as RunNumberType,
+  TraceId as TraceIdType,
+} from "../core/types.js";
+import { RunNumber, scenarioIdFromTraceId } from "../core/types.js";
 import { AnthropicJudgeBackend, type JudgeBackend } from "../judge/index.js";
 import { DockerRunner, SubprocessRunner, type AgentRunner, type AgentHandle } from "../runner/index.js";
 import { makeReportEmitter, type ReportEmitter } from "../emit/report.js";
@@ -70,8 +77,8 @@ function criticalJudgeFromError(message: string): JudgeResult {
 
 function buildRecord(params: {
   readonly source: "scenario" | "trace";
-  readonly scenarioId: string;
-  readonly runNumber: number;
+  readonly scenarioId: ScenarioIdType;
+  readonly runNumber: RunNumberType;
   readonly modelName: string;
   readonly judgeModel: string;
   readonly startedAt: string;
@@ -80,14 +87,14 @@ function buildRecord(params: {
   readonly turns: ReadonlyArray<Turn>;
   readonly workspaceDiff?: WorkspaceDiff;
   readonly transcriptPath: string;
-  readonly traceId?: string;
+  readonly traceId?: TraceIdType;
 }): RunRecord {
   const agg = sumTurns(params.turns);
   const summary = summarizeDiff(params.workspaceDiff);
   const base: RunRecord = {
     source: params.source,
-    scenarioId: ScenarioId(params.scenarioId),
-    runNumber: RunNumber(params.runNumber),
+    scenarioId: params.scenarioId,
+    runNumber: params.runNumber,
     modelName: params.modelName,
     judgeModel: params.judgeModel,
     startedAt: params.startedAt,
@@ -106,7 +113,7 @@ function buildRecord(params: {
     transcriptPath: params.transcriptPath,
     workspaceDiffSummary: summary,
   };
-  return params.traceId !== undefined ? { ...base, traceId: TraceId(params.traceId) } : base;
+  return params.traceId !== undefined ? { ...base, traceId: params.traceId } : base;
 }
 
 function runAgentTurns(
@@ -137,7 +144,7 @@ function runAgentTurns(
 
 function runOneScenarioOnce(
   scenario: Scenario,
-  runNumber: number,
+  runNumber: RunNumberType,
   runner: AgentRunner,
   judge: JudgeBackend,
   emitter: ReportEmitter,
@@ -252,9 +259,9 @@ export function runScenarios(
       ? scenarios.filter((s) => filter.includes(s.id))
       : scenarios;
 
-    const jobs: Array<{ readonly scenario: Scenario; readonly runNumber: number }> = [];
+    const jobs: Array<{ readonly scenario: Scenario; readonly runNumber: RunNumberType }> = [];
     for (const s of selected) {
-      for (let i = 1; i <= runsPer; i += 1) jobs.push({ scenario: s, runNumber: i });
+      for (let i = 1; i <= runsPer; i += 1) jobs.push({ scenario: s, runNumber: RunNumber(i) });
     }
 
     const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
@@ -324,7 +331,7 @@ export function scoreTraces(
 
 function traceToScenario(trace: Trace): Scenario {
   return {
-    id: trace.scenarioId ?? ScenarioId(trace.traceId),
+    id: trace.scenarioId ?? scenarioIdFromTraceId(trace.traceId),
     name: trace.name,
     description: "",
     setupPrompt: trace.turns.length > 0 ? (trace.turns[0]?.prompt ?? "") : "",
@@ -353,7 +360,7 @@ function scoreOneTrace(
     const record = buildRecord({
       source: "trace",
       scenarioId: scenario.id,
-      runNumber: 1,
+      runNumber: RunNumber(1),
       modelName: "trace",
       judgeModel: judge.name,
       startedAt,

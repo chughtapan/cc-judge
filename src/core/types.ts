@@ -11,6 +11,14 @@ export const ScenarioId = Brand.nominal<ScenarioId>();
 export const TraceId = Brand.nominal<TraceId>();
 export const RunNumber = Brand.nominal<RunNumber>();
 
+// Explicit, named conversion from TraceId to ScenarioId. Used only by the
+// trace-scoring path when a Trace omits scenarioId — the trace is synthesized
+// into a pseudo-Scenario so the judge can consume it. Naming the conversion
+// makes the brand crossing auditable (Principle 1: no silent brand laundering).
+export function scenarioIdFromTraceId(t: TraceId): ScenarioId {
+  return ScenarioId(t);
+}
+
 export type IssueSeverity = "minor" | "significant" | "critical";
 
 export type RunSource = "scenario" | "trace";
