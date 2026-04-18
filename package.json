@@ -65,6 +65,7 @@
     "@typescript-eslint/parser": "8.19.0",
     "eslint": "9.17.0",
     "eslint-plugin-safer-by-default": "file:./tools/vendor/eslint-plugin-safer-by-default-0.0.3.tgz",
+    "fast-check": "4.7.0",
     "typescript": "5.6.3",
     "vitest": "2.1.9"
   }
