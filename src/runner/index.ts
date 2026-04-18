@@ -225,7 +225,7 @@ export interface SubprocessRunnerOpts {
   readonly extraArgs?: ReadonlyArray<string>;
 }
 
-const DEFAULT_CLAUDE_ARGS: ReadonlyArray<string> = ["-p", "--output-format", "stream-json"];
+const DEFAULT_CLAUDE_ARGS: ReadonlyArray<string> = ["-p", "--output-format", "stream-json", "--verbose"];
 
 export class SubprocessRunner implements AgentRunner {
   readonly kind: "subprocess" = "subprocess";
