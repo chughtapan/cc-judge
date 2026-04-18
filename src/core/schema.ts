@@ -29,8 +29,16 @@ export const RunSourceSchema = Type.Union([
   Type.Literal("trace"),
 ]);
 
+// Workspace file path: scenario-relative only. Rejects:
+//   - absolute paths (leading `/` or Windows drive `C:\...`)
+//   - any `..` path segment (traversal out of workspace root)
+//   - backslashes (disambiguates from Windows-style separators; POSIX only)
+// Enforced at the P2 decode boundary so untrusted YAML cannot produce a
+// host-FS write primitive via the Docker bind-mount source.
+export const WORKSPACE_PATH_PATTERN = "^(?![/\\\\])(?![a-zA-Z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$";
+
 export const WorkspaceFileSchema = Type.Object({
-  path: Type.String({ minLength: 1 }),
+  path: Type.String({ minLength: 1, maxLength: 1024, pattern: WORKSPACE_PATH_PATTERN }),
   content: Type.String(),
 });
 

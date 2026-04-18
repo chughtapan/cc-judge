@@ -98,21 +98,28 @@ export function runCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, 
     }
     const judge = new AnthropicJudgeBackend({ model: args.judge });
     const emitters = buildObservability(args.emitBraintrust, args.emitPromptfoo);
-    const report = yield* runScenarios(scenarios, {
-      runner,
-      judge,
-      resultsDir: args.results,
-      runsPerScenario: args.runs,
-      concurrency: args.concurrency,
-      emitters,
-      logLevel: args.logLevel,
-      ...(args.scenarioIds !== undefined ? { scenarioIdFilter: args.scenarioIds } : {}),
-      ...(args.githubComment !== undefined ? { githubComment: args.githubComment } : {}),
-      ...(args.githubCommentArtifactUrl !== undefined
-        ? { githubCommentArtifactUrl: args.githubCommentArtifactUrl }
-        : {}),
-      ...(args.totalTimeoutMs !== undefined ? { totalTimeoutMs: args.totalTimeoutMs } : {}),
-    });
+    const runRes = yield* Effect.either(
+      runScenarios(scenarios, {
+        runner,
+        judge,
+        resultsDir: args.results,
+        runsPerScenario: args.runs,
+        concurrency: args.concurrency,
+        emitters,
+        logLevel: args.logLevel,
+        ...(args.scenarioIds !== undefined ? { scenarioIdFilter: args.scenarioIds } : {}),
+        ...(args.githubComment !== undefined ? { githubComment: args.githubComment } : {}),
+        ...(args.githubCommentArtifactUrl !== undefined
+          ? { githubCommentArtifactUrl: args.githubCommentArtifactUrl }
+          : {}),
+        ...(args.totalTimeoutMs !== undefined ? { totalTimeoutMs: args.totalTimeoutMs } : {}),
+      }),
+    );
+    if (runRes._tag === "Left") {
+      process.stderr.write(`cc-judge: runner resolution failed: ${runRes.left.cause._tag}\n`);
+      return 2 as CliExitCode;
+    }
+    const report = runRes.right;
     process.stdout.write(
       `cc-judge: ${String(report.summary.passed)}/${String(report.summary.total)} passed\n`,
     );

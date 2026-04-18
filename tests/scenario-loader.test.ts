@@ -78,6 +78,32 @@ validationChecks: [c]
     expect(result._tag).toBe("Left");
   });
 
+  it("rejects workspace paths that are absolute or contain .. segments", async () => {
+    const cases = [
+      "/etc/passwd",
+      "../../etc/passwd",
+      "src/../../../etc/passwd",
+      "foo/../bar",
+    ];
+    for (const badPath of cases) {
+      const yaml = `
+id: wp-${Buffer.from(badPath).toString("hex").slice(0, 8)}
+name: wp
+description: d
+setupPrompt: p
+expectedBehavior: e
+validationChecks: [c]
+workspace:
+  - path: ${JSON.stringify(badPath)}
+    content: "x"
+`;
+      const result = await Effect.runPromise(
+        Effect.either(scenarioLoader.loadFromYaml(yaml, "mem://wp")),
+      );
+      expect(result._tag, `expected Left for ${badPath}`).toBe("Left");
+    }
+  });
+
   it("fails with GlobNoMatches on an empty pattern", async () => {
     const result = await Effect.runPromise(
       Effect.either(scenarioLoader.loadFromPath("/tmp/cc-judge-nonexistent-*.yaml")),

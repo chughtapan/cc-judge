@@ -10,6 +10,7 @@ import { AnthropicJudgeBackend, type JudgeBackend } from "../judge/index.js";
 import { DockerRunner, SubprocessRunner, type AgentRunner, type AgentHandle } from "../runner/index.js";
 import { makeReportEmitter, type ReportEmitter } from "../emit/report.js";
 import type { ObservabilityEmitter } from "../emit/observability.js";
+import { RunnerResolutionError } from "../core/errors.js";
 import type { RunOpts, ScoreOpts } from "./opts.js";
 
 const DEFAULT_RUNS_PER_SCENARIO = 1;
@@ -214,26 +215,24 @@ function buildReport(runs: ReadonlyArray<RunRecord>, artifactsDir: string | unde
   };
 }
 
-function resolveRunner(opts: RunOpts): AgentRunner {
-  if (opts.runner !== undefined) return opts.runner;
+function resolveRunner(opts: RunOpts): Effect.Effect<AgentRunner, RunnerResolutionError, never> {
+  if (opts.runner !== undefined) return Effect.succeed(opts.runner);
   if (process.env["CC_JUDGE_SUBPROCESS_BIN"] !== undefined) {
-    return new SubprocessRunner({ bin: process.env["CC_JUDGE_SUBPROCESS_BIN"] });
+    return Effect.succeed(new SubprocessRunner({ bin: process.env["CC_JUDGE_SUBPROCESS_BIN"] }));
   }
   const image = process.env["CC_JUDGE_DOCKER_IMAGE"];
   if (image === undefined) {
-    throw new Error(
-      "runScenarios: either opts.runner or CC_JUDGE_DOCKER_IMAGE / CC_JUDGE_SUBPROCESS_BIN must be set",
-    );
+    return Effect.fail(new RunnerResolutionError({ cause: { _tag: "NoRunnerConfigured" } }));
   }
-  return new DockerRunner({ image });
+  return Effect.succeed(new DockerRunner({ image }));
 }
 
 export function runScenarios(
   scenarios: ReadonlyArray<Scenario>,
   opts: RunOpts = {},
-): Effect.Effect<Report, never, never> {
+): Effect.Effect<Report, RunnerResolutionError, never> {
   return Effect.gen(function* () {
-    const runner = resolveRunner(opts);
+    const runner = yield* resolveRunner(opts);
     const judge = opts.judge ?? new AnthropicJudgeBackend();
     const resultsDir = opts.resultsDir ?? "./eval-results";
     const emitter = makeReportEmitter({
@@ -287,7 +286,7 @@ export function runScenarios(
   });
 }
 
-export function runScenario(scenario: Scenario, opts: RunOpts = {}): Effect.Effect<Report, never, never> {
+export function runScenario(scenario: Scenario, opts: RunOpts = {}): Effect.Effect<Report, RunnerResolutionError, never> {
   return runScenarios([scenario], opts);
 }
 

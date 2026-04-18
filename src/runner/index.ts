@@ -13,7 +13,7 @@ import {
   type AgentStartErrorCause,
 } from "../core/errors.js";
 import {
-  ScenarioId,
+  type ScenarioId,
   type RuntimeKind,
   type Turn,
   type WorkspaceDiff,
@@ -25,7 +25,7 @@ import type { Scenario } from "../core/schema.js";
 export interface AgentHandle {
   readonly __brand: "AgentHandle";
   readonly kind: RuntimeKind;
-  readonly scenarioId: string;
+  readonly scenarioId: ScenarioId;
   readonly workspaceDir: string;
   readonly containerId?: string;
   readonly initialFiles: ReadonlyMap<string, string>;
@@ -45,12 +45,19 @@ export interface AgentRunner {
 }
 
 // Shared: write workspace files + capture initial snapshot (before agent runs).
+// Schema already rejects absolute paths and `..` segments at decode time;
+// the resolve-and-compare here is defense-in-depth against any future bypass.
 function makeWorkspace(scenario: Scenario): { dir: string; initialFiles: Map<string, string> } {
   const dir = mkdtempSync(path.join(os.tmpdir(), `cc-judge-${scenario.id}-`));
+  const rootResolved = path.resolve(dir);
   const initialFiles = new Map<string, string>();
   const files: ReadonlyArray<WorkspaceFile> = scenario.workspace ?? [];
   for (const wf of files) {
-    const abs = path.join(dir, wf.path);
+    const abs = path.resolve(rootResolved, wf.path);
+    const rel = path.relative(rootResolved, abs);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      throw new Error(`workspace path escapes root: ${wf.path}`);
+    }
     mkdirSync(path.dirname(abs), { recursive: true });
     writeFileSync(abs, wf.content, "utf8");
     initialFiles.set(wf.path, wf.content);
@@ -301,7 +308,7 @@ export class SubprocessRunner implements AgentRunner {
         resume(
           Effect.fail(
             new AgentRunTimeoutError({
-              scenarioId: ScenarioId(handle.scenarioId),
+              scenarioId: handle.scenarioId,
               turnIndex,
               timeoutMs: opts.timeoutMs,
             }),
@@ -338,7 +345,7 @@ export class SubprocessRunner implements AgentRunner {
         resume(
           Effect.fail(
             new AgentRunTimeoutError({
-              scenarioId: ScenarioId(handle.scenarioId),
+              scenarioId: handle.scenarioId,
               turnIndex,
               timeoutMs: opts.timeoutMs,
             }),
@@ -482,7 +489,7 @@ export class DockerRunner implements AgentRunner {
         resume(
           Effect.fail(
             new AgentRunTimeoutError({
-              scenarioId: ScenarioId(handle.scenarioId),
+              scenarioId: handle.scenarioId,
               turnIndex,
               timeoutMs: opts.timeoutMs,
             }),
@@ -517,7 +524,7 @@ export class DockerRunner implements AgentRunner {
         resume(
           Effect.fail(
             new AgentRunTimeoutError({
-              scenarioId: ScenarioId(handle.scenarioId),
+              scenarioId: handle.scenarioId,
               turnIndex,
               timeoutMs: opts.timeoutMs,
             }),

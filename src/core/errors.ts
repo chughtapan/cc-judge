@@ -53,3 +53,11 @@ export type PublishErrorCause =
   | { readonly _tag: "GhCliMissing" }
   | { readonly _tag: "GhCliFailed"; readonly exitCode: number; readonly stderr: string }
   | { readonly _tag: "BodyTooLarge"; readonly chars: number; readonly limit: number };
+
+export class RunnerResolutionError extends Data.TaggedError("RunnerResolutionError")<{
+  readonly cause: RunnerResolutionCause;
+}> {}
+
+export type RunnerResolutionCause =
+  | { readonly _tag: "NoRunnerConfigured" }
+  | { readonly _tag: "InvalidRuntime"; readonly value: string };
