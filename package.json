@@ -24,7 +24,7 @@
   },
   "scripts": {
     "clean": "rm -rf dist",
-    "build": "pnpm clean && tsc",
+    "build": "pnpm clean && tsc && chmod +x dist/bin.js",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts'",
     "test": "vitest run",
