@@ -59,7 +59,9 @@ Mutation testing runs the full `src/**/*.ts` tree through [Stryker](https://stry
 pnpm mutation
 ```
 
-Config lives in `stryker.config.js`. Thresholds: break at 50, low at 60, high at 80. The TypeScript checker filters mutations that don't typecheck (expected for Effect-heavy code). HTML report lands in `reports/mutation/`. CI is non-gating.
+Config lives in `stryker.config.js`. Thresholds: break at 50, low at 60, high at 80. The TypeScript checker filters mutations that don't typecheck (expected for Effect-heavy code). HTML report lands in `reports/mutation/`.
+
+**Required CI gate:** PRs block on the mutation-score break threshold. The `mutation` job in `.github/workflows/ci.yml` runs Stryker on every PR and fails the build if coverage drops below 50. Stryker runs with `ignoreStatic`, `incremental` (cached across runs via `actions/cache`), and `concurrency: 4` to keep wall-clock bounded.
 
 ## License
 

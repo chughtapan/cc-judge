@@ -8,5 +8,6 @@ eval-results/
 .vitest-cache/
 /tmp/
 .stryker-tmp/
+!.stryker-tmp/incremental.json
 reports/
 stryker.log

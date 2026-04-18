@@ -22,3 +22,25 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+
+  mutation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - name: Cache Stryker incremental state
+        uses: actions/cache@v4
+        with:
+          path: .stryker-tmp/incremental.json
+          key: stryker-incremental-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            stryker-incremental-${{ github.ref }}-
+            stryker-incremental-refs/heads/main-
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm mutation
