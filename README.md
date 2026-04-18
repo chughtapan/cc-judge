@@ -32,6 +32,15 @@ const report = await Effect.runPromise(
 );
 ```
 
+## Testing
+
+- **vitest** — unit and pipeline tests (`pnpm test`).
+- **fast-check** — property-based tests for the scenario loader.
+- **Stryker** — mutation testing over `src/**`.
+- **testcontainers** — real-Docker integration test for `DockerRunner` under `tests/integration/`. Skips cleanly when the Docker daemon is unreachable.
+
+Playwright is intentionally **not** used: cc-judge is a CLI + SDK with no browser surface.
+
 ## Design
 
 - `src/core/` — branded types, tagged errors, TypeBox schemas, scenario loader
