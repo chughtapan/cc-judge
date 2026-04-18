@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.pnpm-store/
+.DS_Store
+*.log
+eval-results/
+.vitest-cache/
+/tmp/
