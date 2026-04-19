@@ -402,55 +402,52 @@ describe("parseScoreArgs", () => {
 // Capture stderr to assert on the exact error-message prefixes runCommand writes
 // on load failure and runner-resolution failure. Kills StringLiteral mutations
 // on those prefixes + the InvalidRuntime cause.value strings.
-describe("runCommand stderr messages", () => {
-  function withStderrCapture<T>(fn: () => Promise<T>): Promise<{ out: T; stderr: string }> {
-    const chunks: string[] = [];
-    const original = process.stderr.write.bind(process.stderr);
-    const spy = (s: string | Uint8Array): boolean => {
-      chunks.push(typeof s === "string" ? s : Buffer.from(s).toString("utf8"));
-      return true;
-    };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (process.stderr as any).write = spy;
-    return fn()
-      .then((out) => ({ out, stderr: chunks.join("") }))
-      .finally(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (process.stderr as any).write = original;
-      });
-  }
+type StderrWriteFn = typeof process.stderr.write;
+type StderrWritable = { write: StderrWriteFn };
 
-  it("writes `cc-judge: runner resolution failed:` with `docker: missing --image` cause", async () => {
+function installStderrCapture(): { chunks: string[]; restore: () => void } {
+  const chunks: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  const spy: StderrWriteFn = ((s: string | Uint8Array): boolean => {
+    chunks.push(typeof s === "string" ? s : Buffer.from(s).toString("utf8"));
+    return true;
+  }) as StderrWriteFn;
+  (process.stderr as unknown as StderrWritable).write = spy;
+  const restore = (): void => {
+    (process.stderr as unknown as StderrWritable).write = original;
+  };
+  return { chunks, restore };
+}
+
+describe("runCommand stderr messages", () => {
+  itEffect("writes `cc-judge: runner resolution failed:` with `docker: missing --image` cause", function* () {
     const dir = tmpScenarioDir();
-    const { stderr } = await withStderrCapture(async () => {
-      const args: RunCliArgs = baseArgs(dir);
-      return await (async () => {
-        const { Effect } = await import("effect");
-        const code = await Effect.runPromise(runCommand(args));
-        return code;
-      })();
-    });
+    const args: RunCliArgs = baseArgs(dir);
+    const { chunks, restore } = installStderrCapture();
+    const code = yield* Effect.ensuring(runCommand(args), Effect.sync(restore));
+    const stderr = chunks.join("");
+    expect(code).toBe(EXIT_RUNNER_RESOLUTION);
     expect(stderr).toContain("cc-judge: runner resolution failed:");
     expect(stderr).toContain("docker: missing --image");
   });
 
-  it("writes `cc-judge: runner resolution failed:` with `subprocess: missing --bin` cause", async () => {
+  itEffect("writes `cc-judge: runner resolution failed:` with `subprocess: missing --bin` cause", function* () {
     const dir = tmpScenarioDir();
-    const { stderr } = await withStderrCapture(async () => {
-      const args: RunCliArgs = { ...baseArgs(dir), runtime: "subprocess" };
-      const { Effect } = await import("effect");
-      return Effect.runPromise(runCommand(args));
-    });
+    const args: RunCliArgs = { ...baseArgs(dir), runtime: "subprocess" };
+    const { chunks, restore } = installStderrCapture();
+    const code = yield* Effect.ensuring(runCommand(args), Effect.sync(restore));
+    const stderr = chunks.join("");
+    expect(code).toBe(EXIT_RUNNER_RESOLUTION);
     expect(stderr).toContain("cc-judge: runner resolution failed:");
     expect(stderr).toContain("subprocess: missing --bin");
   });
 
-  it("writes `cc-judge: load failed:` when scenario path does not exist", async () => {
-    const { stderr } = await withStderrCapture(async () => {
-      const args: RunCliArgs = { ...baseArgs("/tmp"), scenarioPath: SCEN_PATH_BOGUS };
-      const { Effect } = await import("effect");
-      return Effect.runPromise(runCommand(args));
-    });
+  itEffect("writes `cc-judge: load failed:` when scenario path does not exist", function* () {
+    const args: RunCliArgs = { ...baseArgs("/tmp"), scenarioPath: SCEN_PATH_BOGUS };
+    const { chunks, restore } = installStderrCapture();
+    const code = yield* Effect.ensuring(runCommand(args), Effect.sync(restore));
+    const stderr = chunks.join("");
+    expect(code).toBe(EXIT_LOAD_FAILURE);
     expect(stderr).toContain("cc-judge: load failed:");
     expect(stderr).toContain("FileNotFound");
   });
