@@ -1,6 +1,9 @@
 // AgentRunner interface + bundled DockerRunner, SubprocessRunner.
 // Invariant: stop() never fails (teardown is crash-only).
 
+export * from "./runtime.js";
+export * from "./coordinator.js";
+
 import { Effect } from "effect";
 import { execSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";

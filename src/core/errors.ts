@@ -2,7 +2,7 @@
 // Principle 3: errors are typed, not thrown. Every cause is a discriminated tag.
 
 import { Data } from "effect";
-import type { ScenarioId } from "./types.js";
+import type { AgentId, ScenarioId } from "./types.js";
 
 export class LoadError extends Data.TaggedError("LoadError")<{
   readonly cause: LoadErrorCause;
@@ -17,11 +17,15 @@ export type LoadErrorCause =
 
 export class AgentStartError extends Data.TaggedError("AgentStartError")<{
   readonly scenarioId: ScenarioId;
+  readonly agentId?: AgentId;
   readonly cause: AgentStartErrorCause;
 }> {}
 
 export type AgentStartErrorCause =
+  | { readonly _tag: "BuildContextMissing"; readonly path: string }
+  | { readonly _tag: "DockerBuildFailed"; readonly message: string }
   | { readonly _tag: "ImageMissing"; readonly image: string }
+  | { readonly _tag: "ImagePullFailed"; readonly image: string; readonly message: string }
   | { readonly _tag: "ContainerStartFailed"; readonly message: string }
   | { readonly _tag: "BinaryNotFound"; readonly path: string }
   | { readonly _tag: "WorkspacePathEscape"; readonly wfPath: string }
@@ -45,6 +49,43 @@ export class TraceDecodeError extends Data.TaggedError("TraceDecodeError")<{
 export type TraceDecodeCause =
   | { readonly _tag: "UnknownFormat"; readonly path: string }
   | { readonly _tag: "SchemaInvalid"; readonly path: string; readonly errors: ReadonlyArray<string> };
+
+export class BundleDecodeError extends Data.TaggedError("BundleDecodeError")<{
+  readonly cause: BundleDecodeCause;
+}> {}
+
+export type BundleDecodeCause =
+  | { readonly _tag: "UnknownFormat"; readonly path: string }
+  | { readonly _tag: "SchemaInvalid"; readonly path: string; readonly errors: ReadonlyArray<string> };
+
+export class BundleBuildError extends Data.TaggedError("BundleBuildError")<{
+  readonly cause: BundleBuildCause;
+}> {}
+
+export type BundleBuildCause =
+  | { readonly _tag: "DuplicateOutcome"; readonly agentId: string }
+  | { readonly _tag: "MissingOutcomes"; readonly agentIds: ReadonlyArray<string> }
+  | { readonly _tag: "UnknownAgent"; readonly agentId: string }
+  | { readonly _tag: "EventOrderViolation"; readonly previousTs: number; readonly nextTs: number }
+  | { readonly _tag: "SchemaInvalid"; readonly errors: ReadonlyArray<string> };
+
+export class HarnessExecutionError extends Data.TaggedError("HarnessExecutionError")<{
+  readonly cause: HarnessExecutionCause;
+}> {}
+
+export type HarnessExecutionCause =
+  | { readonly _tag: "MissingRuntimeHandle"; readonly agentId: string }
+  | { readonly _tag: "InvalidPlanMetadata"; readonly message: string }
+  | { readonly _tag: "ExecutionFailed"; readonly message: string };
+
+export class RunCoordinationError extends Data.TaggedError("RunCoordinationError")<{
+  readonly cause: RunCoordinationCause;
+}> {}
+
+export type RunCoordinationCause =
+  | { readonly _tag: "AgentStartFailed"; readonly agentId: string; readonly detail: AgentStartErrorCause }
+  | { readonly _tag: "HarnessFailed"; readonly detail: HarnessExecutionCause }
+  | { readonly _tag: "BundleBuildFailed"; readonly detail: BundleBuildCause };
 
 export class PublishError extends Data.TaggedError("PublishError")<{
   readonly cause: PublishErrorCause;
@@ -81,7 +122,10 @@ export const LOAD_ERROR_CAUSE = {
 } as const satisfies { readonly [K in LoadErrorCause["_tag"]]: K };
 
 export const AGENT_START_CAUSE = {
+  BuildContextMissing: "BuildContextMissing",
+  DockerBuildFailed: "DockerBuildFailed",
   ImageMissing: "ImageMissing",
+  ImagePullFailed: "ImagePullFailed",
   ContainerStartFailed: "ContainerStartFailed",
   BinaryNotFound: "BinaryNotFound",
   WorkspacePathEscape: "WorkspacePathEscape",

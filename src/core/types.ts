@@ -3,10 +3,16 @@
 
 import { Brand } from "effect";
 
+export type ProjectId = string & Brand.Brand<"ProjectId">;
+export type RunId = string & Brand.Brand<"RunId">;
+export type AgentId = string & Brand.Brand<"AgentId">;
 export type ScenarioId = string & Brand.Brand<"ScenarioId">;
 export type TraceId = string & Brand.Brand<"TraceId">;
 export type RunNumber = number & Brand.Brand<"RunNumber">;
 
+export const ProjectId = Brand.nominal<ProjectId>();
+export const RunId = Brand.nominal<RunId>();
+export const AgentId = Brand.nominal<AgentId>();
 export const ScenarioId = Brand.nominal<ScenarioId>();
 export const TraceId = Brand.nominal<TraceId>();
 export const RunNumber = Brand.nominal<RunNumber>();
@@ -27,9 +33,10 @@ export const ISSUE_SEVERITY = {
   Critical: "critical",
 } as const satisfies { readonly [K in Capitalize<IssueSeverity>]: Uncapitalize<K> };
 
-export type RunSource = "scenario" | "trace";
+export type RunSource = "bundle" | "scenario" | "trace";
 
 export const RUN_SOURCE = {
+  Bundle: "bundle",
   Scenario: "scenario",
   Trace: "trace",
 } as const satisfies { readonly [K in Capitalize<RunSource>]: Uncapitalize<K> };
@@ -61,6 +68,51 @@ export interface WorkspaceFileChange {
 
 export interface WorkspaceDiff {
   readonly changed: ReadonlyArray<WorkspaceFileChange>;
+}
+
+export type ExecutionArtifact =
+  | {
+      readonly _tag: "DockerBuildArtifact";
+      readonly contextPath: string;
+      readonly dockerfilePath?: string;
+      readonly target?: string;
+      readonly buildArgs?: Readonly<Record<string, string>>;
+      readonly imageTag?: string;
+    }
+  | {
+      readonly _tag: "DockerImageArtifact";
+      readonly image: string;
+      readonly pullPolicy?: "always" | "if-missing" | "never";
+    };
+
+export const EXECUTION_ARTIFACT_TAG = {
+  DockerBuildArtifact: "DockerBuildArtifact",
+  DockerImageArtifact: "DockerImageArtifact",
+} as const satisfies { readonly [K in ExecutionArtifact["_tag"]]: K };
+
+export interface AgentDeclaration {
+  readonly id: AgentId;
+  readonly name: string;
+  readonly role?: string;
+  readonly artifact: ExecutionArtifact;
+  readonly promptInputs: Readonly<Record<string, unknown>>;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+export interface RunRequirements {
+  readonly expectedBehavior: string;
+  readonly validationChecks: ReadonlyArray<string>;
+  readonly judgeRubric?: string;
+}
+
+export interface RunPlan {
+  readonly project: ProjectId;
+  readonly scenarioId: ScenarioId;
+  readonly name: string;
+  readonly description: string;
+  readonly agents: readonly [AgentDeclaration, ...AgentDeclaration[]];
+  readonly requirements: RunRequirements;
+  readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
 export interface Turn {
@@ -97,9 +149,64 @@ export interface AgentRef {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
+export interface AgentTurn {
+  readonly turn: Turn;
+  readonly agentId?: AgentId;
+}
+
+export type AgentLifecycleStatus =
+  | "completed"
+  | "timed_out"
+  | "failed_to_start"
+  | "runtime_error"
+  | "cancelled";
+
+export const AGENT_LIFECYCLE_STATUS = {
+  Completed: "completed",
+  TimedOut: "timed_out",
+  FailedToStart: "failed_to_start",
+  RuntimeError: "runtime_error",
+  Cancelled: "cancelled",
+} as const;
+
+export interface AgentOutcome {
+  readonly agentId: AgentId;
+  readonly status: AgentLifecycleStatus;
+  readonly startedAt?: string;
+  readonly endedAt: string;
+  readonly exitCode?: number;
+  readonly reason?: string;
+}
+
+export interface JudgmentBundle {
+  readonly runId: RunId;
+  readonly project: ProjectId;
+  readonly scenarioId: ScenarioId;
+  readonly name: string;
+  readonly description: string;
+  readonly requirements: RunRequirements;
+  readonly agents: ReadonlyArray<AgentRef>;
+  readonly turns?: ReadonlyArray<AgentTurn>;
+  readonly events?: ReadonlyArray<TraceEvent>;
+  readonly phases?: ReadonlyArray<Phase>;
+  readonly context?: Readonly<Record<string, unknown>>;
+  readonly workspaceDiff?: WorkspaceDiff;
+  readonly outcomes: ReadonlyArray<AgentOutcome>;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
 export interface DeterministicCtx {
   readonly transcript: string;
   readonly diff: WorkspaceDiff;
+}
+
+export function agentRefFromDeclaration(agent: AgentDeclaration): AgentRef {
+  return {
+    id: agent.id,
+    name: agent.name,
+    ...(agent.role !== undefined ? { role: agent.role } : {}),
+    ...(agent.metadata !== undefined ? { metadata: agent.metadata } : {}),
+  };
 }
 
 // Utility: make unreachable branches a type error. Principle 4.

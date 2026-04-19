@@ -5,6 +5,9 @@
 import { Effect } from "effect";
 import type { Report, RunRecord, Scenario, Trace, JudgeResult } from "../core/schema.js";
 import type {
+  JudgmentBundle,
+  RunPlan,
+  AgentTurn,
   Turn,
   WorkspaceDiff,
   IssueSeverity,
@@ -12,13 +15,26 @@ import type {
   RunNumber as RunNumberType,
   TraceId as TraceIdType,
 } from "../core/types.js";
-import { RunNumber, scenarioIdFromTraceId } from "../core/types.js";
-import { AnthropicJudgeBackend, type JudgeBackend } from "../judge/index.js";
-import { DockerRunner, SubprocessRunner, type AgentRunner, type AgentHandle } from "../runner/index.js";
+import {
+  RUN_SOURCE,
+  RunId,
+  RunNumber,
+  agentRefFromDeclaration,
+  scenarioIdFromTraceId,
+} from "../core/types.js";
+import { AnthropicJudgeBackend, judgeBundle, type JudgeBackend } from "../judge/index.js";
+import {
+  DefaultRunCoordinator,
+  DockerRuntime,
+  DockerRunner,
+  SubprocessRunner,
+  type AgentRunner,
+  type AgentHandle,
+} from "../runner/index.js";
 import { makeReportEmitter, type ReportEmitter } from "../emit/report.js";
 import type { ObservabilityEmitter } from "../emit/observability.js";
 import { RunnerResolutionError } from "../core/errors.js";
-import type { RunOpts, ScoreOpts } from "./opts.js";
+import type { HarnessRunOpts, PlannedRunInput, RunOpts, ScoreOpts } from "./opts.js";
 
 const DEFAULT_RUNS_PER_SCENARIO = 1;
 const DEFAULT_CONCURRENCY = 1;
@@ -114,6 +130,65 @@ function buildRecord(params: {
     workspaceDiffSummary: summary,
   };
   return params.traceId !== undefined ? { ...base, traceId: params.traceId } : base;
+}
+
+function sumAgentTurns(turns: ReadonlyArray<AgentTurn> | undefined): {
+  readonly toolCallCount: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
+} {
+  if (turns === undefined) {
+    return {
+      toolCallCount: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    };
+  }
+  return sumTurns(turns.map((entry) => entry.turn));
+}
+
+function bundleModelName(bundle: JudgmentBundle): string {
+  const modelName = bundle.metadata?.["modelName"];
+  return typeof modelName === "string" && modelName.length > 0
+    ? modelName
+    : `${bundle.project}/bundle`;
+}
+
+function buildBundleRecord(params: {
+  readonly bundle: JudgmentBundle;
+  readonly judge: JudgeResult;
+  readonly judgeModel: string;
+  readonly startedAt: string;
+  readonly latencyMs: number;
+}): RunRecord {
+  const agg = sumAgentTurns(params.bundle.turns);
+  const summary = summarizeDiff(params.bundle.workspaceDiff);
+  return {
+    source: RUN_SOURCE.Bundle,
+    scenarioId: params.bundle.scenarioId,
+    runNumber: RunNumber(1),
+    modelName: bundleModelName(params.bundle),
+    judgeModel: params.judgeModel,
+    startedAt: params.startedAt,
+    latencyMs: params.latencyMs,
+    pass: params.judge.pass,
+    reason: params.judge.reason,
+    issues: params.judge.issues,
+    overallSeverity: params.judge.overallSeverity as IssueSeverity | null,
+    judgeConfidence: params.judge.judgeConfidence ?? null,
+    retryCount: params.judge.retryCount,
+    toolCallCount: agg.toolCallCount,
+    inputTokens: agg.inputTokens,
+    outputTokens: agg.outputTokens,
+    cacheReadTokens: agg.cacheReadTokens,
+    cacheWriteTokens: agg.cacheWriteTokens,
+    transcriptPath: "",
+    workspaceDiffSummary: summary,
+  };
 }
 
 function runAgentTurns(
@@ -297,6 +372,111 @@ export function runScenario(scenario: Scenario, opts: RunOpts = {}): Effect.Effe
   return runScenarios([scenario], opts);
 }
 
+function resolveCoordinator(opts: HarnessRunOpts) {
+  return opts.coordinator ?? new DefaultRunCoordinator(opts.runtime ?? new DockerRuntime());
+}
+
+export function runWithHarness(
+  plan: RunPlan,
+  harness: PlannedRunInput["harness"],
+  opts: HarnessRunOpts = {},
+): Effect.Effect<Report, never, never> {
+  return runPlans([{ plan, harness }], opts);
+}
+
+export function runPlans(
+  inputs: ReadonlyArray<PlannedRunInput>,
+  opts: HarnessRunOpts = {},
+): Effect.Effect<Report, never, never> {
+  return Effect.gen(function* () {
+    const judge = opts.judge ?? new AnthropicJudgeBackend();
+    const resultsDir = opts.resultsDir ?? "./eval-results";
+    const emitter = makeReportEmitter({
+      resultsDir,
+      ...(opts.githubComment !== undefined ? { githubComment: opts.githubComment } : {}),
+      ...(opts.githubCommentArtifactUrl !== undefined
+        ? { githubCommentArtifactUrl: opts.githubCommentArtifactUrl }
+        : {}),
+    });
+    const obs = opts.emitters ?? [];
+    const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
+    const coordinator = resolveCoordinator(opts);
+    const records = yield* Effect.forEach(
+      inputs,
+      (input) => runOnePlannedInput(input, coordinator, judge, emitter, obs, opts.abortSignal),
+      { concurrency },
+    );
+    const report = buildReport(records, resultsDir);
+    yield* emitter.emitReport(report);
+    yield* Effect.forEach(obs, (observer) => observer.onReport({ report }), { discard: true });
+    if (opts.githubComment !== undefined) {
+      yield* emitter.publishGithubComment(report).pipe(Effect.catchAll(() => Effect.void));
+    }
+    return report;
+  });
+}
+
+function runOnePlannedInput(
+  input: PlannedRunInput,
+  coordinator: ReturnType<typeof resolveCoordinator>,
+  judge: JudgeBackend,
+  emitter: ReportEmitter,
+  obs: ReadonlyArray<ObservabilityEmitter>,
+  abortSignal: AbortSignal | undefined,
+): Effect.Effect<RunRecord, never, never> {
+  return Effect.gen(function* () {
+    const startedAt = nowIso();
+    const startMs = Date.now();
+    const executionOpts = abortSignal !== undefined ? { abortSignal } : {};
+    const execution = yield* Effect.either(coordinator.execute(input.plan, input.harness, executionOpts));
+    const bundle = execution._tag === "Right"
+      ? execution.right
+      : coordinationFailureBundle(input.plan, execution.left);
+    const judgeResult = yield* judgeBundle(judge, bundle, abortSignal);
+    const record = buildBundleRecord({
+      bundle,
+      judge: judgeResult,
+      judgeModel: judge.name,
+      startedAt,
+      latencyMs: Date.now() - startMs,
+    });
+    yield* emitter.emitRun(record);
+    yield* Effect.forEach(obs, (observer) => observer.onRun({ record }), { discard: true });
+    return record;
+  });
+}
+
+export function scoreBundles(
+  bundles: ReadonlyArray<JudgmentBundle>,
+  opts: ScoreOpts = {},
+): Effect.Effect<Report, never, never> {
+  return Effect.gen(function* () {
+    const judge = opts.judge ?? new AnthropicJudgeBackend();
+    const resultsDir = opts.resultsDir ?? "./eval-results";
+    const emitter = makeReportEmitter({
+      resultsDir,
+      ...(opts.githubComment !== undefined ? { githubComment: opts.githubComment } : {}),
+      ...(opts.githubCommentArtifactUrl !== undefined
+        ? { githubCommentArtifactUrl: opts.githubCommentArtifactUrl }
+        : {}),
+    });
+    const obs = opts.emitters ?? [];
+    const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
+    const records = yield* Effect.forEach(
+      bundles,
+      (bundle) => scoreOneBundle(bundle, judge, emitter, obs, opts.abortSignal),
+      { concurrency },
+    );
+    const report = buildReport(records, resultsDir);
+    yield* emitter.emitReport(report);
+    yield* Effect.forEach(obs, (observer) => observer.onReport({ report }), { discard: true });
+    if (opts.githubComment !== undefined) {
+      yield* emitter.publishGithubComment(report).pipe(Effect.catchAll(() => Effect.void));
+    }
+    return report;
+  });
+}
+
 export function scoreTraces(
   traces: ReadonlyArray<Trace>,
   opts: ScoreOpts = {},
@@ -321,7 +501,7 @@ export function scoreTraces(
     );
     const report = buildReport(records, resultsDir);
     yield* emitter.emitReport(report);
-    yield* Effect.forEach(obs, (e) => e.onReport({ report }), { discard: true });
+    yield* Effect.forEach(obs, (observer) => observer.onReport({ report }), { discard: true });
     if (opts.githubComment !== undefined) {
       yield* emitter.publishGithubComment(report).pipe(Effect.catchAll(() => Effect.void));
     }
@@ -377,7 +557,53 @@ function scoreOneTrace(
       traceId: trace.traceId,
     });
     yield* emitter.emitRun(record);
+    yield* Effect.forEach(obs, (observer) => observer.onRun({ record }), { discard: true });
+    return record;
+  });
+}
+
+function scoreOneBundle(
+  bundle: JudgmentBundle,
+  judge: JudgeBackend,
+  emitter: ReportEmitter,
+  obs: ReadonlyArray<ObservabilityEmitter>,
+  abortSignal: AbortSignal | undefined,
+): Effect.Effect<RunRecord, never, never> {
+  return Effect.gen(function* () {
+    const startedAt = nowIso();
+    const startMs = Date.now();
+    const judgeResult = yield* judgeBundle(judge, bundle, abortSignal);
+    const record = buildBundleRecord({
+      bundle,
+      judge: judgeResult,
+      judgeModel: judge.name,
+      startedAt,
+      latencyMs: Date.now() - startMs,
+    });
+    yield* emitter.emitRun(record);
     yield* Effect.forEach(obs, (e) => e.onRun({ record }), { discard: true });
     return record;
   });
+}
+
+function coordinationFailureBundle(plan: RunPlan, error: { readonly cause: { readonly _tag: string } }): JudgmentBundle {
+  return {
+    runId: RunId(`${plan.project}:${plan.scenarioId}:failed:${Date.now()}`),
+    project: plan.project,
+    scenarioId: plan.scenarioId,
+    name: plan.name,
+    description: plan.description,
+    requirements: plan.requirements,
+    agents: plan.agents.map(agentRefFromDeclaration),
+    outcomes: plan.agents.map((agent) => ({
+      agentId: agent.id,
+      status: "runtime_error" as const,
+      endedAt: nowIso(),
+      reason: `coordination failed: ${error.cause._tag}`,
+    })),
+    metadata: {
+      coordinationFailure: error.cause._tag,
+      modelName: `${plan.project}/coordinator`,
+    },
+  };
 }
