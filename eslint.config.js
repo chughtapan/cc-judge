@@ -28,11 +28,8 @@ export default [
     },
   },
 
-  // Block 2: tests. Start from recommended, then carve out the two rules that
-  // fight vitest idioms today: `async-keyword` (tests use async/await; Effect.gen
-  // conversion lands in a follow-up) and `no-hardcoded-assertion-literals` (many
-  // assertions still use raw literals). Both carve-outs are temporary and removed
-  // when /safer:implement-senior rewrites the suite.
+  // Block 2: tests. Full recommended preset applies. `@typescript-eslint/no-explicit-any`
+  // is relaxed to warn because test fixtures occasionally need escape hatches.
   {
     files: ["tests/**/*.ts", "**/*.test.ts", "**/*.spec.ts"],
     languageOptions: {
@@ -45,8 +42,6 @@ export default [
     },
     rules: {
       ...guard.configs.recommended.rules,
-      "agent-code-guard/async-keyword": "off",
-      "agent-code-guard/no-hardcoded-assertion-literals": "off",
       "@typescript-eslint/no-explicit-any": "warn",
     },
   },
