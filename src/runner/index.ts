@@ -47,22 +47,47 @@ export interface AgentRunner {
 // Shared: write workspace files + capture initial snapshot (before agent runs).
 // Schema already rejects absolute paths and `..` segments at decode time;
 // the resolve-and-compare here is defense-in-depth against any future bypass.
-function makeWorkspace(scenario: Scenario): { dir: string; initialFiles: Map<string, string> } {
-  const dir = mkdtempSync(path.join(os.tmpdir(), `cc-judge-${scenario.id}-`));
-  const rootResolved = path.resolve(dir);
-  const initialFiles = new Map<string, string>();
-  const files: ReadonlyArray<WorkspaceFile> = scenario.workspace ?? [];
-  for (const wf of files) {
-    const abs = path.resolve(rootResolved, wf.path);
-    const rel = path.relative(rootResolved, abs);
-    if (rel.startsWith("..") || path.isAbsolute(rel)) {
-      throw new Error(`workspace path escapes root: ${wf.path}`);
-    }
-    mkdirSync(path.dirname(abs), { recursive: true });
-    writeFileSync(abs, wf.content, "utf8");
-    initialFiles.set(wf.path, wf.content);
-  }
-  return { dir, initialFiles };
+class PathEscapeSignal {
+  constructor(readonly wfPath: string) {}
+}
+
+function makeWorkspace(
+  scenario: Scenario,
+): Effect.Effect<{ dir: string; initialFiles: Map<string, string> }, AgentStartError, never> {
+  return Effect.try({
+    try: () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), `cc-judge-${scenario.id}-`));
+      const rootResolved = path.resolve(dir);
+      const initialFiles = new Map<string, string>();
+      const files: ReadonlyArray<WorkspaceFile> = scenario.workspace ?? [];
+      for (const wf of files) {
+        const abs = path.resolve(rootResolved, wf.path);
+        const rel = path.relative(rootResolved, abs);
+        if (rel.startsWith("..") || path.isAbsolute(rel)) {
+          throw new PathEscapeSignal(wf.path);
+        }
+        mkdirSync(path.dirname(abs), { recursive: true });
+        writeFileSync(abs, wf.content, "utf8");
+        initialFiles.set(wf.path, wf.content);
+      }
+      return { dir, initialFiles };
+    },
+    catch: (err): AgentStartError => {
+      if (err instanceof PathEscapeSignal) {
+        return new AgentStartError({
+          scenarioId: scenario.id,
+          cause: { _tag: "WorkspacePathEscape", wfPath: err.wfPath },
+        });
+      }
+      return new AgentStartError({
+        scenarioId: scenario.id,
+        cause: {
+          _tag: "WorkspaceSetupFailed",
+          message: err instanceof Error ? err.message : String(err),
+        },
+      });
+    },
+  });
 }
 
 function walkWorkspace(dir: string): Effect.Effect<ReadonlyMap<string, string>, never, never> {
@@ -245,28 +270,18 @@ export class SubprocessRunner implements AgentRunner {
           }),
         );
       }
-      try {
-        const { dir, initialFiles } = makeWorkspace(scenario);
-        const handle: AgentHandle = {
-          __brand: "AgentHandle",
-          kind: "subprocess",
-          scenarioId: scenario.id,
-          workspaceDir: dir,
-          initialFiles,
-          turnsExecuted: { count: 0 },
-        };
-        return Effect.succeed(handle);
-      } catch (err: unknown) {
-        return Effect.fail(
-          new AgentStartError({
+      return makeWorkspace(scenario).pipe(
+        Effect.map(
+          ({ dir, initialFiles }): AgentHandle => ({
+            __brand: "AgentHandle",
+            kind: "subprocess",
             scenarioId: scenario.id,
-            cause: {
-              _tag: "WorkspaceSetupFailed",
-              message: err instanceof Error ? err.message : String(err),
-            },
+            workspaceDir: dir,
+            initialFiles,
+            turnsExecuted: { count: 0 },
           }),
-        );
-      }
+        ),
+      );
     });
   }
 
@@ -409,50 +424,52 @@ export class DockerRunner implements AgentRunner {
           }),
         );
       }
-      try {
-        const { dir, initialFiles } = makeWorkspace(scenario);
-        const network = this.#opts.network ?? "none";
-        const args = [
-          "create",
-          "--rm",
-          "-v",
-          `${dir}:/workspace`,
-          "-w",
-          "/workspace",
-          "--network",
-          network,
-          ...(this.#opts.memoryMb !== undefined ? ["--memory", `${this.#opts.memoryMb}m`] : []),
-          ...(this.#opts.cpus !== undefined ? ["--cpus", String(this.#opts.cpus)] : []),
-          this.#opts.image,
-          "tail",
-          "-f",
-          "/dev/null",
-        ];
-        const cid = execSync(`docker ${args.map(shellQuote).join(" ")}`, { stdio: ["ignore", "pipe", "pipe"] })
-          .toString("utf8")
-          .trim();
-        execSync(`docker start ${shellQuote(cid)}`, { stdio: "ignore" });
-        const handle: AgentHandle = {
-          __brand: "AgentHandle",
-          kind: "docker",
-          scenarioId: scenario.id,
-          workspaceDir: dir,
-          containerId: cid,
-          initialFiles,
-          turnsExecuted: { count: 0 },
-        };
-        return Effect.succeed(handle);
-      } catch (err: unknown) {
-        return Effect.fail(
-          new AgentStartError({
-            scenarioId: scenario.id,
-            cause: {
-              _tag: "ContainerStartFailed",
-              message: err instanceof Error ? err.message : String(err),
+      return makeWorkspace(scenario).pipe(
+        Effect.flatMap(({ dir, initialFiles }) =>
+          Effect.try({
+            try: (): AgentHandle => {
+              const network = this.#opts.network ?? "none";
+              const args = [
+                "create",
+                "--rm",
+                "-v",
+                `${dir}:/workspace`,
+                "-w",
+                "/workspace",
+                "--network",
+                network,
+                ...(this.#opts.memoryMb !== undefined ? ["--memory", `${this.#opts.memoryMb}m`] : []),
+                ...(this.#opts.cpus !== undefined ? ["--cpus", String(this.#opts.cpus)] : []),
+                this.#opts.image,
+                "tail",
+                "-f",
+                "/dev/null",
+              ];
+              const cid = execSync(`docker ${args.map(shellQuote).join(" ")}`, { stdio: ["ignore", "pipe", "pipe"] })
+                .toString("utf8")
+                .trim();
+              execSync(`docker start ${shellQuote(cid)}`, { stdio: "ignore" });
+              return {
+                __brand: "AgentHandle",
+                kind: "docker",
+                scenarioId: scenario.id,
+                workspaceDir: dir,
+                containerId: cid,
+                initialFiles,
+                turnsExecuted: { count: 0 },
+              };
             },
+            catch: (err): AgentStartError =>
+              new AgentStartError({
+                scenarioId: scenario.id,
+                cause: {
+                  _tag: "ContainerStartFailed",
+                  message: err instanceof Error ? err.message : String(err),
+                },
+              }),
           }),
-        );
-      }
+        ),
+      );
     });
   }
 
