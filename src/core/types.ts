@@ -76,6 +76,27 @@ export interface Turn {
   readonly cacheWriteTokens: number;
 }
 
+// Multi-agent event types for extended traces.
+export type TraceEvent =
+  | { readonly type: "message"; readonly from: string; readonly to?: string; readonly channel: string; readonly text: string; readonly ts: number }
+  | { readonly type: "phase"; readonly phase: string; readonly round?: number; readonly ts: number }
+  | { readonly type: "action"; readonly agent: string; readonly action: string; readonly channel: string; readonly ts: number }
+  | { readonly type: "state"; readonly snapshot: Readonly<Record<string, unknown>>; readonly ts: number };
+
+export interface Phase {
+  readonly id: string;
+  readonly name: string;
+  readonly tsStart: number;
+  readonly tsEnd?: number;
+}
+
+export interface AgentRef {
+  readonly id: string;
+  readonly name: string;
+  readonly role?: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
 export interface DeterministicCtx {
   readonly transcript: string;
   readonly diff: WorkspaceDiff;

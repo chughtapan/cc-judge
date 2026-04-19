@@ -337,6 +337,7 @@ function traceToScenario(trace: Trace): Scenario {
     setupPrompt: trace.turns.length > 0 ? (trace.turns[0]?.prompt ?? "") : "",
     expectedBehavior: trace.expectedBehavior,
     validationChecks: trace.validationChecks,
+    ...(trace.judgeRubric !== undefined ? { judgeRubric: trace.judgeRubric } : {}),
   };
 }
 
@@ -355,6 +356,10 @@ function scoreOneTrace(
       scenario,
       turns: trace.turns,
       ...(trace.workspaceDiff !== undefined ? { workspaceDiff: trace.workspaceDiff } : {}),
+      ...(trace.events !== undefined ? { events: trace.events } : {}),
+      ...(trace.phases !== undefined ? { phases: trace.phases } : {}),
+      ...(trace.agents !== undefined ? { agents: trace.agents } : {}),
+      ...(trace.context !== undefined ? { context: trace.context } : {}),
       ...(abortSignal !== undefined ? { abortSignal } : {}),
     });
     const record = buildRecord({

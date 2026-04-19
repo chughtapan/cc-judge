@@ -49,8 +49,11 @@ cc-judge score <traces-path-or-glob>   [options]
 #### `score` command
 
 - `--judge` — Judge backend: `anthropic` (default).
-- `--results-dir` — Directory for report output. Default: `./cc-judge-results`.
+- `--judge-rubric` — Path to a rubric file appended to the judge system prompt. Use this to customize scoring criteria for different trace types (e.g., multi-agent game evaluation).
+- `--results-dir` — Directory for report output. Default: `./eval-results`.
 - `--verbose` — Enable debug logging.
+
+The `score` command accepts a single file, a glob pattern, or a directory containing `.json`/`.yaml`/`.yml` trace files.
 
 ### Exit codes
 

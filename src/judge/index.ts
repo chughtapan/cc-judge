@@ -6,7 +6,7 @@
 import { Effect } from "effect";
 import { Value } from "@sinclair/typebox/value";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { Turn, WorkspaceDiff, Issue, IssueSeverity } from "../core/types.js";
+import type { Turn, WorkspaceDiff, Issue, IssueSeverity, TraceEvent, Phase, AgentRef } from "../core/types.js";
 import {
   type JudgeResult,
   type Scenario,
@@ -17,6 +17,10 @@ export interface JudgeInput {
   readonly scenario: Scenario;
   readonly turns: ReadonlyArray<Turn>;
   readonly workspaceDiff?: WorkspaceDiff;
+  readonly events?: ReadonlyArray<TraceEvent>;
+  readonly phases?: ReadonlyArray<Phase>;
+  readonly agents?: ReadonlyArray<AgentRef>;
+  readonly context?: Readonly<Record<string, unknown>>;
   readonly abortSignal?: AbortSignal;
 }
 
@@ -30,6 +34,7 @@ export interface AnthropicJudgeBackendOpts {
   readonly maxTurns?: number;
   readonly perAttemptTimeoutMs?: number;
   readonly retrySchedule?: ReadonlyArray<number>;
+  readonly systemPrompt?: string;
 }
 
 const DEFAULT_MODEL = "claude-opus-4-7";
@@ -39,7 +44,7 @@ const DEFAULT_PER_ATTEMPT_TIMEOUT_MS = 120_000;
 const DEFAULT_RETRY_SCHEDULE: ReadonlyArray<number> = [500, 1_500, 4_500];
 
 // What we ask the judge model to emit. Kept tight so parse errors are rare.
-const JUDGE_SYSTEM_PROMPT = `You are a verdict-only evaluator. Read the scenario, the agent transcript, and the workspace diff; then emit a single JSON object and nothing else. Schema:
+export const JUDGE_SYSTEM_PROMPT = `You are a verdict-only evaluator. Read the scenario, the agent transcript, and the workspace diff; then emit a single JSON object and nothing else. Schema:
 {
   "pass": boolean,
   "reason": string,
@@ -74,25 +79,61 @@ function renderTurns(turns: ReadonlyArray<Turn>): string {
   return parts.join("\n");
 }
 
+function renderEvents(events: ReadonlyArray<TraceEvent>): string {
+  const parts: string[] = [];
+  for (const e of events) {
+    switch (e.type) {
+      case "message":
+        parts.push(`[${new Date(e.ts).toISOString()}] [${e.channel}] ${e.from}${e.to ? ` -> ${e.to}` : ""}: ${e.text}`);
+        break;
+      case "phase":
+        parts.push(`[${new Date(e.ts).toISOString()}] PHASE: ${e.phase}${e.round !== undefined ? ` (round ${e.round})` : ""}`);
+        break;
+      case "action":
+        parts.push(`[${new Date(e.ts).toISOString()}] [${e.channel}] ${e.agent} ACTION: ${e.action}`);
+        break;
+      case "state":
+        parts.push(`[${new Date(e.ts).toISOString()}] STATE: ${JSON.stringify(e.snapshot)}`);
+        break;
+    }
+  }
+  return parts.join("\n");
+}
+
+function renderAgents(agents: ReadonlyArray<AgentRef>): string {
+  return agents.map((a) => `- ${a.name} (${a.id})${a.role ? ` role=${a.role}` : ""}`).join("\n");
+}
+
 function renderPrompt(input: JudgeInput): string {
   const s = input.scenario;
   const checks = s.validationChecks.map((c, i) => `${i + 1}. ${c}`).join("\n");
-  return [
+  const sections: string[] = [
     `# Scenario: ${s.name}`,
     `Description: ${s.description}`,
     `Expected behavior: ${s.expectedBehavior}`,
     "",
     "Validation checks (each must hold for pass=true):",
     checks,
-    "",
-    "# Transcript",
-    renderTurns(input.turns),
-    "",
-    "# Workspace diff",
-    renderDiff(input.workspaceDiff),
-    "",
-    "Return the JSON verdict now.",
-  ].join("\n");
+  ];
+
+  if (input.agents !== undefined && input.agents.length > 0) {
+    sections.push("", "# Agents", renderAgents(input.agents));
+  }
+
+  if (input.events !== undefined && input.events.length > 0) {
+    sections.push("", "# Event timeline", renderEvents(input.events));
+  } else {
+    sections.push("", "# Transcript", renderTurns(input.turns));
+  }
+
+  sections.push("", "# Workspace diff", renderDiff(input.workspaceDiff));
+
+  if (input.context !== undefined && Object.keys(input.context).length > 0) {
+    sections.push("", "# Context", JSON.stringify(input.context, null, 2));
+  }
+
+  sections.push("", "Return the JSON verdict now.");
+  return sections.join("\n");
 }
 
 function extractJsonText(text: string): string {
@@ -166,6 +207,7 @@ function collectSdkMessages(
   model: string,
   maxTurns: number,
   abortController: AbortController,
+  systemPrompt: string,
 ): Effect.Effect<ReadonlyArray<SDKMessage>, JudgeAttemptError, never> {
   return Effect.suspend(() => {
     const q = query({
@@ -174,7 +216,7 @@ function collectSdkMessages(
         model,
         maxTurns,
         abortController,
-        systemPrompt: { type: "preset", preset: "claude_code", append: JUDGE_SYSTEM_PROMPT },
+        systemPrompt: { type: "preset", preset: "claude_code", append: systemPrompt },
         allowDangerouslySkipPermissions: true,
       },
     });
@@ -327,6 +369,7 @@ function timeoutEff<A>(
 
 function runAttempt(
   input: JudgeInput,
+  systemPrompt: string,
   model: string,
   maxTurns: number,
   timeoutMs: number,
@@ -339,7 +382,7 @@ function runAttempt(
     else parentSignal.addEventListener("abort", () => abortController.abort(), { once: true });
   }
   const prompt = renderPrompt(input);
-  const collect = collectSdkMessages(prompt, model, maxTurns, abortController).pipe(
+  const collect = collectSdkMessages(prompt, model, maxTurns, abortController, systemPrompt).pipe(
     Effect.flatMap((messages) => {
       for (const m of messages) {
         if (m.type === "result" && m.subtype !== "success") {
@@ -364,12 +407,14 @@ export class AnthropicJudgeBackend implements JudgeBackend {
   readonly #maxTurns: number;
   readonly #perAttemptTimeoutMs: number;
   readonly #retrySchedule: ReadonlyArray<number>;
+  readonly #systemPrompt: string;
 
   constructor(opts: AnthropicJudgeBackendOpts = {}) {
     this.#model = opts.model ?? DEFAULT_MODEL;
     this.#maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS;
     this.#perAttemptTimeoutMs = opts.perAttemptTimeoutMs ?? DEFAULT_PER_ATTEMPT_TIMEOUT_MS;
     this.#retrySchedule = opts.retrySchedule ?? DEFAULT_RETRY_SCHEDULE;
+    this.#systemPrompt = opts.systemPrompt ?? JUDGE_SYSTEM_PROMPT;
   }
 
   judge(input: JudgeInput): Effect.Effect<JudgeResult, never, never> {
@@ -377,6 +422,11 @@ export class AnthropicJudgeBackend implements JudgeBackend {
     const maxTurns = this.#maxTurns;
     const timeoutMs = this.#perAttemptTimeoutMs;
     const schedule = this.#retrySchedule;
+    const basePrompt = this.#systemPrompt;
+    const rubric = (input.scenario as { judgeRubric?: string }).judgeRubric;
+    const effectivePrompt = rubric !== undefined && rubric.length > 0
+      ? `${basePrompt}\n\n${rubric}`
+      : basePrompt;
 
     const loop = Effect.gen(function* () {
       let attempt = 0;
@@ -387,7 +437,7 @@ export class AnthropicJudgeBackend implements JudgeBackend {
           yield* sleepEff(delay);
         }
         const res = yield* Effect.either(
-          runAttempt(input, model, maxTurns, timeoutMs, input.abortSignal, attempt),
+          runAttempt(input, effectivePrompt, model, maxTurns, timeoutMs, input.abortSignal, attempt),
         );
         if (res._tag === "Right") return res.right;
         lastErr = res.left;
