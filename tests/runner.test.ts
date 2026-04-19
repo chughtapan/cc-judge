@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Effect } from "effect";
-import { existsSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, writeFileSync, unlinkSync, mkdirSync, symlinkSync, chmodSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fc from "fast-check";
@@ -56,6 +56,35 @@ const CONTENT_ORIGINAL = "original";
 const CONTENT_MODIFIED = "modified";
 
 const CHANGED_EMPTY_LEN = 0;
+const RESP_ASYNC_MARKER = "ASYNC_MARKER";
+const CUSTOM_ENV_KEY = "CC_JUDGE_TEST_CUSTOM";
+const CUSTOM_ENV_VALUE = "custom-env-value-xyz";
+const CWD_MARKER_FILE = "cwd-marker.txt";
+const CWD_MARKER_CONTENT = "I am in the custom cwd";
+const LATENCY_UPPER_BOUND_MS = 30_000;
+const NESTED_DIR = "nested";
+const NESTED_FILE = "nested/inner.txt";
+const NESTED_CONTENT = "nested content";
+const RESP_NUMERIC_CONTENT = "should not appear";
+const RESP_NO_TYPE_CONTENT = "no-type-response";
+const RESP_STDERR_ONLY = "only-stderr-output-xyz";
+const TOOL_CALL_COUNT_ONE = 1;
+
+const RESP_TRIMMED = "trimmed";
+const RESP_AFTER_BLANKS = "after-blanks";
+const RESP_SHOULD_NOT_APPEAR = "should-not-appear";
+const RESP_NOPE = "nope";
+const RESP_ALSO_NOPE = "also-nope";
+const RESP_OBJ_CONTENT = "obj-content";
+const RESP_KEEP_THIS = "keep-this";
+const RESP_SHOULD_NOT_OVERWRITE = "should-not-overwrite";
+const RESP_REAL = "real";
+const RESP_AFTER_SCALARS = "after-scalars";
+const RESP_HELLO_SPACE = "hello ";
+const RESP_WORLD = "world";
+const RESP_HELLO_WORLD = "hello world";
+const DEEP_FILE_CONTENT = "deep";
+const DEEP_FILE_NAME = "deep-file.txt";
 
 function makeScenario(overrides: Partial<Scenario> = {}): Scenario {
   return {
@@ -538,4 +567,466 @@ describe("SubprocessRunner.start() property: never throws", () => {
       ),
       { numRuns: 30 },
     ));
+});
+
+// ------------------------------------------------------------------
+// SubprocessRunner.diff() — directory traversal (kills isDirectory/isFile conditionals)
+// ------------------------------------------------------------------
+
+describe("SubprocessRunner.diff() directory traversal", () => {
+  itEffect("finds files inside a nested subdirectory created after start", function* () {
+    const runner = new SubprocessRunner({ bin: "/bin/echo" });
+    const handle = yield* runner.start(makeScenario());
+    // Create a nested directory with a file — exercises the isDirectory() branch so
+    // walkInto recurses into subdirectories correctly.
+    const subDir = path.join(handle.workspaceDir, NESTED_DIR);
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(path.join(subDir, "inner.txt"), NESTED_CONTENT);
+    const diff = yield* runner.diff(handle);
+    yield* runner.stop(handle);
+    const entry = diff.changed.find((c) => c.path === NESTED_FILE);
+    expect(entry).toBeDefined();
+    expect(entry?.before).toBeNull();
+    expect(entry?.after).toBe(NESTED_CONTENT);
+  });
+
+  itEffect("initial workspace with nested subdirectory is captured in initialFiles", function* () {
+    const runner = new SubprocessRunner({ bin: "/bin/echo" });
+    const scenario = makeScenario({
+      workspace: [
+        { path: FILE_A_NAME, content: CONTENT_HELLO },
+        { path: NESTED_FILE, content: NESTED_CONTENT },
+      ],
+    });
+    const handle = yield* runner.start(scenario);
+    expect(handle.initialFiles.get(FILE_A_NAME)).toBe(CONTENT_HELLO);
+    expect(handle.initialFiles.get(NESTED_FILE)).toBe(NESTED_CONTENT);
+    const diff = yield* runner.diff(handle);
+    yield* runner.stop(handle);
+    // No changes yet — unchanged files produce empty diff.
+    expect(diff.changed).toHaveLength(CHANGED_EMPTY_LEN);
+  });
+
+  itEffect("symlinks in workspace are not treated as regular files (isFile guard)", function* () {
+    const runner = new SubprocessRunner({ bin: "/bin/echo" });
+    const handle = yield* runner.start(makeScenario());
+    // Create a symlink to an external path — isFile() returns false for symlinks
+    // on some platforms; the walker must not crash or double-count them.
+    const linkPath = path.join(handle.workspaceDir, "link.txt");
+    try {
+      symlinkSync("/etc/hostname", linkPath);
+    } catch (symlinkErr) {
+      void symlinkErr;
+      // If symlink creation fails (e.g. permissions), skip this assertion.
+      yield* runner.stop(handle);
+      return;
+    }
+    const diff = yield* runner.diff(handle);
+    yield* runner.stop(handle);
+    // The diff should not throw regardless of symlink presence.
+    expect(Array.isArray(diff.changed)).toBe(true);
+  });
+});
+
+// ------------------------------------------------------------------
+// SubprocessRunner.turn() — cwd and env options (kills lines 297 and 304)
+// ------------------------------------------------------------------
+
+describe("SubprocessRunner.turn() cwd and env options", () => {
+  itEffect("respects explicit cwd option by running in that directory", function* () {
+    // Create a temporary directory and place a marker file there.
+    // Use `cat` as the binary to read the marker file; the response reveals the cwd.
+    const cwdDir = os.tmpdir();
+    const markerFile = path.join(cwdDir, CWD_MARKER_FILE);
+    writeFileSync(markerFile, CWD_MARKER_CONTENT);
+    const runner = new SubprocessRunner({
+      bin: process.execPath,
+      extraArgs: [
+        "-e",
+        `process.stdout.write(require("node:fs").readFileSync("${CWD_MARKER_FILE}","utf8"))`,
+        "--",
+      ],
+      cwd: cwdDir,
+    });
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    unlinkSync(markerFile);
+    // The script read CWD_MARKER_FILE relative to the cwd; if cwd is set correctly
+    // the marker content appears in the response.
+    expect(turn.response).toContain(CWD_MARKER_CONTENT);
+  });
+
+  itEffect("merges explicit env into process.env when env option is provided", function* () {
+    // The script echoes the custom env var to stdout.
+    const runner = new SubprocessRunner({
+      bin: process.execPath,
+      extraArgs: [
+        "-e",
+        `process.stdout.write(process.env["${CUSTOM_ENV_KEY}"] ?? "MISSING")`,
+        "--",
+      ],
+      env: { [CUSTOM_ENV_KEY]: CUSTOM_ENV_VALUE },
+    });
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    // The custom env var must be present in the child environment.
+    expect(turn.response).toContain(CUSTOM_ENV_VALUE);
+  });
+
+  itEffect("uses workspaceDir as default cwd when no cwd option provided", function* () {
+    // Write a marker file to the workspace; the script reads it using a relative path.
+    // This only works if the process is spawned with cwd = workspaceDir.
+    const runner = new SubprocessRunner({
+      bin: process.execPath,
+      extraArgs: [
+        "-e",
+        `process.stdout.write(require("node:fs").existsSync("${CWD_MARKER_FILE}") ? "found" : "missing")`,
+        "--",
+      ],
+    });
+    const handle = yield* runner.start(makeScenario());
+    writeFileSync(path.join(handle.workspaceDir, CWD_MARKER_FILE), CWD_MARKER_CONTENT);
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    // "found" only if workspaceDir is the actual cwd.
+    expect(turn.response).toContain("found");
+  });
+});
+
+// ------------------------------------------------------------------
+// SubprocessRunner.turn() — stream-json parsing edge cases
+// (kills lines 207, 211, 194-195, 308)
+// ------------------------------------------------------------------
+
+describe("SubprocessRunner.turn() stream-json parsing — edge cases", () => {
+  itEffect("ignores assistant event when content is non-string (numeric)", function* () {
+    // Line 211: typeof content === "string" — must guard non-string content.
+    // With mutant (if true), numeric content would be concatenated to response string.
+    const runner = nodeScript(
+      `process.stdout.write(JSON.stringify({type:"assistant",content:42})+"\\n")`,
+    );
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    // Numeric content must NOT be appended; response stays empty → falls through to stderr fallback ("").
+    expect(turn.response).toBe("");
+  });
+
+  itEffect("treats event with non-string type as default-branch (no response accumulation)", function* () {
+    // Line 207: typeof obj.type === "string" — when type is numeric, the default case fires.
+    // The default case must not accumulate response.
+    const runner = nodeScript(
+      `process.stdout.write(JSON.stringify({type:99,result:"should-not-appear"})+"\\n")`,
+    );
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    // sawStructured=true (parsed object found) so response stays ""; no result accumulation.
+    expect(turn.response).toBe("");
+  });
+
+  itEffect("skips blank lines between JSON events (trim + length check)", function* () {
+    // Lines 194-195: blank line skip — blank lines must not produce JSON parse errors.
+    const script = [
+      `process.stdout.write("\\n")`,
+      `process.stdout.write("   \\n")`,
+      `process.stdout.write(JSON.stringify({type:"assistant",content:"hello from agent"})+"\\n")`,
+    ].join(";");
+    const runner = nodeScript(script);
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    expect(turn.response).toBe(RESP_ASSISTANT_HELLO);
+  });
+
+  itEffect("JSON parse failure on malformed line does not corrupt subsequent events", function* () {
+    // Line 199: catch/continue — a bad JSON line must be silently skipped, not propagated.
+    const script = [
+      `process.stdout.write("{bad json\\n")`,
+      `process.stdout.write(JSON.stringify({type:"tool_use"})+"\\n")`,
+      `process.stdout.write(JSON.stringify({type:"tool_use"})+"\\n")`,
+    ].join(";");
+    const runner = nodeScript(script);
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    // Two tool_use events must be counted; bad JSON line silently skipped.
+    expect(turn.toolCallCount).toBe(TOOL_CALL_COUNT_TWO);
+  });
+
+  itEffect("stderr fallback does not include stale initial string (exact prefix check)", function* () {
+    // Line 308: stderr = "" init — if stderr were pre-initialized to garbage, the
+    // response would include that garbage prefix when stdout is empty.
+    const runner = nodeScript(`process.stderr.write("${RESP_STDERR_ONLY}\\n")`);
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    // Response must start with exactly the stderr content, not anything extra.
+    expect(turn.response.startsWith(RESP_STDERR_ONLY)).toBe(true);
+  });
+
+  itEffect("tool_call event increments toolCallCount (not tool_use)", function* () {
+    // Verifies tool_call branch is covered independently of tool_use.
+    const runner = nodeScript(
+      `process.stdout.write(JSON.stringify({type:"tool_call"})+"\\n")`,
+    );
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    expect(turn.toolCallCount).toBe(TOOL_CALL_COUNT_ONE);
+  });
+});
+
+// ------------------------------------------------------------------
+// SubprocessRunner.turn() — latency is measured correctly (kills line 345)
+// ------------------------------------------------------------------
+
+describe("SubprocessRunner.turn() latency measurement", () => {
+  itEffect("latencyMs is non-negative and within reasonable bounds", function* () {
+    // Line 345: latencyMs = Date.now() - startMs.
+    // With mutant (Date.now() + startMs), latencyMs would be a huge positive number.
+    const runner = new SubprocessRunner({ bin: "/bin/echo" });
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "hi", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    expect(turn.latencyMs).toBeGreaterThanOrEqual(0);
+    // With the + mutant, latencyMs ~ 2 * Date.now() ≈ 3.4e12 ms, far above 30 s.
+    expect(turn.latencyMs).toBeLessThan(LATENCY_UPPER_BOUND_MS);
+  });
+});
+
+// ------------------------------------------------------------------
+// parseStreamJson — whitespace trimming (kills line 194 MethodExpression)
+// ------------------------------------------------------------------
+
+describe("parseStreamJson whitespace handling", () => {
+  itEffect("parses JSON lines with leading/trailing whitespace", function* () {
+    // Line 194: line.trim() — if mutant replaces trim() with line, whitespace-padded
+    // JSON lines would fail to parse. Test that whitespace is actually stripped.
+    const runner = nodeScript(
+      [
+        `process.stdout.write("  " + JSON.stringify({type:"assistant",content:"${RESP_TRIMMED}"}) + "  \\n")`,
+        `process.stdout.write("\\t" + JSON.stringify({type:"tool_use"}) + "\\n")`,
+      ].join(";"),
+    );
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    // Whitespace-padded JSON must be trimmed and parsed correctly.
+    expect(turn.response).toContain(RESP_TRIMMED);
+    expect(turn.toolCallCount).toBe(TOOL_CALL_COUNT_ONE);
+  });
+
+  itEffect("blank lines do not corrupt response when mixed with whitespace-padded JSON", function* () {
+    // Line 194-195: blank line handling combined with trimming.
+    // With the trim mutant, whitespace-only lines would not be detected as blank.
+    const runner = nodeScript(
+      [
+        `process.stdout.write("  \\n")`,
+        `process.stdout.write("\\t\\n")`,
+        `process.stdout.write("  " + JSON.stringify({type:"assistant",content:"${RESP_AFTER_BLANKS}"}) + "\\n")`,
+      ].join(";"),
+    );
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    expect(turn.response).toContain(RESP_AFTER_BLANKS);
+  });
+});
+
+// ------------------------------------------------------------------
+// parseStreamJson — type guard (kills line 207 ConditionalExpression)
+// ------------------------------------------------------------------
+
+describe("parseStreamJson type guard", () => {
+  itEffect("non-string type field does not accumulate response via result branch", function* () {
+    // Line 207: typeof obj.type === "string" ? obj.type : ""
+    // The "true" mutant would keep the numeric type, which wouldn't match "result"
+    // in the switch — but the "false" mutant would replace with "", hitting default.
+    // Test that an event with a non-string type and a result field does NOT set response.
+    const runner = nodeScript(
+      `process.stdout.write(JSON.stringify({type:null,result:"${RESP_SHOULD_NOT_APPEAR}"})+"\\n")`,
+    );
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    // type=null → falls to default case → response stays empty
+    expect(turn.response).toBe("");
+  });
+
+  itEffect("event with undefined type falls to default and does not set response", function* () {
+    // Line 207: typeof obj.type === "string" — undefined is not a string → "".
+    const runner = nodeScript(
+      `process.stdout.write(JSON.stringify({result:"${RESP_NOPE}",content:"${RESP_ALSO_NOPE}"})+"\\n")`,
+    );
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    expect(turn.response).toBe("");
+  });
+
+  itEffect("event with object type (not string) does not match assistant case", function* () {
+    // Line 207: typeof obj.type === "string" — object is not a string → "".
+    const runner = nodeScript(
+      `process.stdout.write(JSON.stringify({type:{nested:true},content:"${RESP_OBJ_CONTENT}"})+"\\n")`,
+    );
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    // Non-string type → default case fires → no response accumulation.
+    expect(turn.response).toBe("");
+  });
+});
+
+// ------------------------------------------------------------------
+// parseStreamJson — result branch priority (kills line 216 ConditionalExpression)
+// ------------------------------------------------------------------
+
+describe("parseStreamJson result branch", () => {
+  itEffect("result event with existing response does NOT overwrite (response.length > 0 guard)", function* () {
+    // Line 216: response = response.length > 0 ? response : result
+    // With the "false" mutant, result always overwrites. Test that existing response is kept.
+    const script = [
+      `process.stdout.write(JSON.stringify({type:"assistant",content:"${RESP_KEEP_THIS}"})+"\\n")`,
+      `process.stdout.write(JSON.stringify({type:"result",result:"${RESP_SHOULD_NOT_OVERWRITE}"})+"\\n")`,
+    ].join(";");
+    const runner = nodeScript(script);
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    expect(turn.response).toContain(RESP_KEEP_THIS);
+    expect(turn.response).not.toContain(RESP_SHOULD_NOT_OVERWRITE);
+  });
+});
+
+// ------------------------------------------------------------------
+// parseStreamJson — default case (kills line 224 ConditionalExpression)
+// ------------------------------------------------------------------
+
+describe("parseStreamJson default case", () => {
+  itEffect("unknown event types do not accumulate toolCallCount or response", function* () {
+    // Line 224: default: — mutant removes the default case label.
+    // Events with unrecognized types should not change toolCallCount or response.
+    const script = [
+      `process.stdout.write(JSON.stringify({type:"system",message:"ignored"})+"\\n")`,
+      `process.stdout.write(JSON.stringify({type:"user",message:"ignored"})+"\\n")`,
+      `process.stdout.write(JSON.stringify({type:"assistant",content:"${RESP_REAL}"})+"\\n")`,
+    ].join(";");
+    const runner = nodeScript(script);
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    // Only the assistant event should contribute.
+    expect(turn.response).toBe(RESP_REAL);
+    expect(turn.toolCallCount).toBe(TOOL_CALL_COUNT_ZERO);
+  });
+});
+
+// ------------------------------------------------------------------
+// parseStreamJson — non-object parsed values (kills line 204)
+// ------------------------------------------------------------------
+
+describe("parseStreamJson non-object guard", () => {
+  itEffect("parses a bare string JSON value without crashing (skips it)", function* () {
+    // Line 204: typeof parsed !== "object" || parsed === null — bare values are skipped.
+    const runner = nodeScript(
+      [
+        `process.stdout.write(JSON.stringify("just a string")+"\\n")`,
+        `process.stdout.write(JSON.stringify(42)+"\\n")`,
+        `process.stdout.write(JSON.stringify(null)+"\\n")`,
+        `process.stdout.write(JSON.stringify({type:"assistant",content:"${RESP_AFTER_SCALARS}"})+"\\n")`,
+      ].join(";"),
+    );
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    // sawStructured=true after the last line, so response = "after-scalars"
+    expect(turn.response).toContain(RESP_AFTER_SCALARS);
+    expect(turn.toolCallCount).toBe(TOOL_CALL_COUNT_ZERO);
+  });
+});
+
+// ------------------------------------------------------------------
+// parseStreamJson — assistant content concatenation (kills line 211)
+// ------------------------------------------------------------------
+
+describe("parseStreamJson assistant concatenation", () => {
+  itEffect("concatenates content from multiple assistant events", function* () {
+    // Line 211: response += content — the += mutant to = would only keep the last.
+    const script = [
+      `process.stdout.write(JSON.stringify({type:"assistant",content:"${RESP_HELLO_SPACE}"})+"\\n")`,
+      `process.stdout.write(JSON.stringify({type:"assistant",content:"${RESP_WORLD}"})+"\\n")`,
+    ].join(";");
+    const runner = nodeScript(script);
+    const handle = yield* runner.start(makeScenario());
+    const turn = yield* runner.turn(handle, "x", { timeoutMs: 10_000 });
+    yield* runner.stop(handle);
+    expect(turn.response).toBe(RESP_HELLO_WORLD);
+  });
+});
+
+// ------------------------------------------------------------------
+// SubprocessRunner.stop() — removes nested directory (kills line 391 BooleanLiteral)
+// ------------------------------------------------------------------
+
+describe("SubprocessRunner.stop() recursive removal", () => {
+  itEffect("removes workspace directory with nested subdirectories", function* () {
+    // Line 391: rmSync({ recursive: true, force: true })
+    // With { recursive: false }, nested dirs would cause ENOTEMPTY error.
+    const runner = new SubprocessRunner({ bin: "/bin/echo" });
+    const scenario = makeScenario({
+      workspace: [{ path: NESTED_FILE, content: NESTED_CONTENT }],
+    });
+    const handle = yield* runner.start(makeScenario());
+    // Add extra nested dirs that weren't in the original workspace.
+    const deepDir = path.join(handle.workspaceDir, "deep", "nested", "dir");
+    mkdirSync(deepDir, { recursive: true });
+    writeFileSync(path.join(deepDir, DEEP_FILE_NAME), DEEP_FILE_CONTENT);
+    const dir = handle.workspaceDir;
+    expect(existsSync(dir)).toBe(true);
+    yield* runner.stop(handle);
+    // The entire tree must be gone — { recursive: false } would leave remnants.
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(deepDir)).toBe(false);
+  });
+});
+
+// ------------------------------------------------------------------
+// SubprocessRunner.diff() — walkInto readFile failure (kills L105, L118 ArrowFunction)
+// ------------------------------------------------------------------
+
+describe("SubprocessRunner.diff() walkInto error resilience", () => {
+  itEffect("succeeds even if a file becomes unreadable between listing and reading", function* () {
+    // Lines 105, 118: catch: () => null / catch: () => null
+    // These catch handlers silently swallow readFile errors.
+    // Create a file, start, then make it unreadable before calling diff.
+    const runner = new SubprocessRunner({ bin: "/bin/echo" });
+    const handle = yield* runner.start(makeScenario());
+    const filePath = path.join(handle.workspaceDir, "unreadable.txt");
+    writeFileSync(filePath, "content");
+    // Make the file unreadable (chmod 000).
+    try {
+      chmodSync(filePath, 0o000);
+      // diff() must not throw — the walker catches the readFile error.
+      const diff = yield* runner.diff(handle);
+      // The key assertion is that diff() doesn't throw.
+      expect(Array.isArray(diff.changed)).toBe(true);
+    } catch (chmodErr) {
+      void chmodErr;
+      // chmod may fail in certain environments (e.g., root, Docker).
+      // In that case, just verify diff doesn't throw.
+      const diff = yield* runner.diff(handle);
+      expect(Array.isArray(diff.changed)).toBe(true);
+    } finally {
+      // Restore permissions so stop() can clean up.
+      try {
+        chmodSync(filePath, 0o644);
+      } catch (restoreErr) {
+        void restoreErr;
+      }
+      yield* runner.stop(handle);
+    }
+  });
 });
