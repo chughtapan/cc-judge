@@ -1323,3 +1323,381 @@ describe("AnthropicJudgeBackend retry loop attempt numbering", () => {
     expect(result.issues[0]?.issue).not.toContain("no attempts ran");
   }, 10_000);
 });
+
+// ── Survivor kills: ArrayDeclaration (renderDiff lines[], renderTurns parts[]) ───
+describe("AnthropicJudgeBackend renderDiff/renderTurns array initialization", () => {
+  itEffect("renderDiff output with 3 entries has exactly 3 lines (no spurious prefix)", function* () {
+    // Kill ArrayDeclaration survivor at L54: lines must start as [], not ["Stryker was here"].
+    // If lines were pre-populated, the output would contain extra unexpected lines.
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    const diff: WorkspaceDiff = {
+      changed: [
+        { path: "a.txt", before: null, after: "x" },
+        { path: "b.txt", before: "old", after: null },
+        { path: "c.txt", before: "o", after: "n" },
+      ],
+    };
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input(diff));
+    const prompt = capturedPrompts[0] ?? "";
+    const diffSection = prompt.split("# Workspace diff\n")[1] ?? "";
+    const diffLines = diffSection.split("\n").filter((l) => l.startsWith("+") || l.startsWith("-") || l.startsWith("~"));
+    // Exactly 3 diff lines (one per changed entry), no extra spurious entries.
+    expect(diffLines).toHaveLength(3);
+  });
+
+  itEffect("renderTurns output with 2 turns has exactly 6 lines per turn section", function* () {
+    // Kill ArrayDeclaration survivor at L68: parts must start as [], not ["Stryker was here"].
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge({
+      scenario: makeScenario("s"),
+      turns: [
+        makeTurn("p1", "r1"),
+        makeTurn("p2", "r2"),
+      ],
+    });
+    const prompt = capturedPrompts[0] ?? "";
+    const transcriptSection = prompt.split("# Transcript\n")[1]?.split("\n\n")[0] ?? "";
+    const transcriptLines = transcriptSection.split("\n");
+    // 2 turns * 3 lines each (separator, USER, ASSISTANT) = 6 lines.
+    expect(transcriptLines).toHaveLength(6);
+  });
+
+  itEffect("renderDiff before!=null && after!=null falls into else (modified) branch", function* () {
+    // Kill ConditionalExpression survivor at L58: else-if must not always be true.
+    // When before is non-null and after is non-null, the else branch fires (~ modified).
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    const diff: WorkspaceDiff = {
+      changed: [{ path: "m.txt", before: "old-content", after: "new-content" }],
+    };
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input(diff));
+    const prompt = capturedPrompts[0] ?? "";
+    expect(prompt).toContain("~ modified m.txt");
+    // Must NOT be rendered as + added or - removed.
+    expect(prompt).not.toContain("+ added m.txt");
+    expect(prompt).not.toContain("- removed m.txt");
+  });
+});
+
+// ── Survivor kills: renderPrompt section blank lines (StringLiteral L84, L93) ───
+describe("AnthropicJudgeBackend renderPrompt blank line separators", () => {
+  itEffect("blank line appears between scenario header and Validation checks heading", function* () {
+    // Kill StringLiteral survivor at L84: the empty-string element in the prompt array
+    // produces a blank line. If replaced with "Stryker was here!", that text appears.
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    const prompt = capturedPrompts[0] ?? "";
+    // There must be a blank line (two consecutive newlines) between the expected behavior
+    // line and the "Validation checks" heading — not any spurious text.
+    expect(prompt).not.toContain("Stryker was here");
+    expect(prompt).toMatch(/Expected behavior: e\n\nValidation checks/u);
+  });
+
+  itEffect("blank line appears between Transcript and Workspace diff sections", function* () {
+    // Kill StringLiteral survivor at L93: empty string before "# Workspace diff".
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    const diff: WorkspaceDiff = {
+      changed: [{ path: "f.txt", before: null, after: "data" }],
+    };
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input(diff));
+    const prompt = capturedPrompts[0] ?? "";
+    // Transcript section ends, blank line, then "# Workspace diff".
+    expect(prompt).not.toContain("Stryker was here");
+    expect(prompt).toMatch(/\n\n# Workspace diff/u);
+  });
+});
+
+// ── Survivor kills: extractJsonText regex mutations (L102, L103, L104) ──────────
+describe("AnthropicJudgeBackend extractJsonText regex edge cases", () => {
+  itEffect("fence with trailing spaces after ```json is stripped correctly", function* () {
+    // Kill Regex survivors at L102: \s* must consume trailing spaces after ```json.
+    // If \s* becomes \S* or is removed, the spaces remain and corrupt the JSON.
+    setAttemptsToSequence([[
+      successResultMessage(
+        "```json   \n" +
+          JSON.stringify(VERDICT_PASS) +
+          "\n```",
+      ),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.pass).toBe(true);
+  });
+
+  itEffect("fence with leading spaces before closing ``` is stripped correctly", function* () {
+    // Kill Regex survivors at L103: \s* before ``` in fenceEnd must consume spaces.
+    setAttemptsToSequence([[
+      successResultMessage(
+        "```json\n" +
+          JSON.stringify(VERDICT_PASS) +
+          "\n   ```",
+      ),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.pass).toBe(true);
+  });
+
+  itEffect("fence with trailing spaces after closing ``` is stripped correctly", function* () {
+    // Kill Regex survivors at L103: \s* after ``` in fenceEnd must consume spaces.
+    setAttemptsToSequence([[
+      successResultMessage(
+        "```json\n" +
+          JSON.stringify(VERDICT_PASS) +
+          "\n```   ",
+      ),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.pass).toBe(true);
+  });
+
+  itEffect("both fences present with extra whitespace: fences are actually stripped", function* () {
+    // Kill MethodExpression survivor at L104: second .replace(fenceEnd, "") must fire.
+    // If only fenceStart is stripped, the trailing ``` remains in the text and
+    // JSON.parse fails.
+    setAttemptsToSequence([[
+      successResultMessage(
+        "   ```json   \n" +
+          JSON.stringify(VERDICT_PASS) +
+          "\n   ```   ",
+      ),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.pass).toBe(true);
+  });
+
+  itEffect("no fence present: raw JSON is parsed without modification", function* () {
+    // Verify the fences are not overzealously applied to non-fenced text.
+    setAttemptsToSequence([[
+      successResultMessage(JSON.stringify(VERDICT_PASS)),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.pass).toBe(true);
+  });
+});
+
+// ── Survivor kills: collectAssistantText content non-array (L129) ───────────────
+describe("AnthropicJudgeBackend collectAssistantText non-array content", () => {
+  itEffect("non-array content on assistant message falls through to result text", function* () {
+    // Kill ConditionalExpression survivor at L129: Array.isArray(content) must be false
+    // for non-array content. When content is a string, the loop body is skipped and
+    // text stays empty (unless set by a result message).
+    setAttemptsToSequence([[
+      { type: "assistant", message: { content: "not an array" } },
+      { type: "assistant", message: { content: 42 } },
+      successResultMessage(JSON.stringify(VERDICT_PASS)),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.pass).toBe(true);
+  });
+});
+
+// ── Survivor kills: coerceIssues entry null/object check (L263) ─────────────────
+describe("AnthropicJudgeBackend coerceIssues non-object entry handling", () => {
+  itEffect("entries that are non-object primitives are silently dropped from issues", function* () {
+    // Kill ConditionalExpression survivor at L263:
+    // typeof entry !== "object" || entry === null → false
+    // If the guard is removed, primitive entries would cause a runtime error when
+    // accessing entry.issue. Test with a verdict that includes a string entry.
+    setAttemptsToSequence([[
+      successResultMessage({
+        pass: false,
+        reason: REASON_FAIL,
+        issues: [
+          "not-an-object",
+          { issue: ISSUE_TEXT, severity: ISSUE_SEVERITY.Critical },
+        ],
+        overallSeverity: ISSUE_SEVERITY.Critical,
+      }),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    // Only the valid entry survives.
+    expect(result.issues.length).toBe(1);
+    expect(result.issues[0]?.issue).toBe(ISSUE_TEXT);
+  });
+
+  itEffect("null entry in issues array is silently dropped", function* () {
+    // Kill ConditionalExpression survivor at L263: null entry must be skipped.
+    setAttemptsToSequence([[
+      successResultMessage({
+        pass: false,
+        reason: REASON_FAIL,
+        issues: [
+          null,
+          { issue: ISSUE_TEXT, severity: ISSUE_SEVERITY.Critical },
+        ],
+        overallSeverity: ISSUE_SEVERITY.Critical,
+      }),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.issues.length).toBe(1);
+  });
+});
+
+// ── Survivor kills: coerceConfidence boundary operators (L280, L281) ────────────
+describe("AnthropicJudgeBackend coerceConfidence exact boundaries", () => {
+  itEffect("confidence at exactly -0 (negative zero) is not clamped", function* () {
+    // Kill EqualityOperator at L280: v < 0 must be false for -0 (which equals 0).
+    setAttemptsToSequence([[
+      successResultMessage({
+        pass: true,
+        reason: REASON_PASS,
+        issues: [],
+        overallSeverity: null,
+        judgeConfidence: -0,
+      }),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.judgeConfidence).toBe(0);
+    // Must not be clamped (clamping would still give 0, so verify the value is
+    // exactly 0 and not undefined).
+    expect(result.judgeConfidence).not.toBeUndefined();
+  });
+
+  itEffect("confidence at exactly 0 passes through unchanged", function* () {
+    // Kill EqualityOperator at L280: v < 0 → v <= 0 would clamp 0 to 0 (same value),
+    // so this test alone doesn't kill it. But paired with the test that verifies
+    // 0 is returned (not clamped/changed), it confirms the boundary is exclusive.
+    setAttemptsToSequence([[
+      successResultMessage({
+        pass: true,
+        reason: REASON_PASS,
+        issues: [],
+        overallSeverity: null,
+        judgeConfidence: 0,
+      }),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.judgeConfidence).toBe(0);
+  });
+
+  itEffect("confidence at exactly 1 passes through unchanged", function* () {
+    // Kill EqualityOperator at L281: v > 1 → v >= 1 would clamp 1 to 1 (same value),
+    // so we need a different approach. Test that 1 is present in the result.
+    setAttemptsToSequence([[
+      successResultMessage({
+        pass: true,
+        reason: REASON_PASS,
+        issues: [],
+        overallSeverity: null,
+        judgeConfidence: 1,
+      }),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.judgeConfidence).toBe(1);
+    expect(result.judgeConfidence).not.toBeUndefined();
+  });
+});
+
+// ── Survivor kills: buildResult errs path (L244) + confidence spread (L254) ────
+describe("AnthropicJudgeBackend buildResult validation paths", () => {
+  itEffect("valid verdict produces result with judgeConfidence spread only when present", function* () {
+    // Kill ConditionalExpression at L254: confidence undefined must NOT be spread.
+    // When confidence is absent, the result object must not have the key at all.
+    setAttemptsToSequence([[
+      successResultMessage({
+        pass: true,
+        reason: REASON_PASS,
+        issues: [],
+        overallSeverity: null,
+      }),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.judgeConfidence).toBeUndefined();
+    expect("judgeConfidence" in result).toBe(false);
+  });
+
+  itEffect("valid verdict with confidence includes judgeConfidence in result", function* () {
+    // Counterpart: when confidence IS present, it must be spread in.
+    setAttemptsToSequence([[
+      successResultMessage({
+        pass: true,
+        reason: REASON_PASS,
+        issues: [],
+        overallSeverity: null,
+        judgeConfidence: 0.5,
+      }),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.judgeConfidence).toBe(0.5);
+    expect("judgeConfidence" in result).toBe(true);
+  });
+});
+
+// ── Survivor kills: retry loop sleep guard + schedule indexing ─────────────────
+describe("AnthropicJudgeBackend retry loop sleep and schedule", () => {
+  itEffect("second attempt succeeds with retryCount=1 (sleep branch fires)", function* () {
+    // Kill ConditionalExpression at L385: attempt > 0 must be true on retry.
+    // Kill EqualityOperator at L385: attempt > 0 must not be attempt >= 0.
+    // Kill BlockStatement at L385: the sleep block must execute.
+    // Kill ArithmeticOperator at L386: schedule[attempt - 1] not attempt + 1.
+    const bad = [successResultMessage("{bad json}")];
+    const ok = [successResultMessage("", STRUCTURED_PASS_VERDICT)];
+    setAttemptsToSequence([bad, ok]);
+    const backend = new AnthropicJudgeBackend({
+      retrySchedule: [5],
+      perAttemptTimeoutMs: 500,
+    });
+    const result = yield* backend.judge(input());
+    expect(result.retryCount).toBe(RETRY_ONE);
+    expect(result.pass).toBe(true);
+  }, 10_000);
+
+  itEffect("third attempt succeeds with retryCount=2 (two sleeps fired)", function* () {
+    // Kill ArithmeticOperator at L386: schedule[attempt-1] indexing.
+    // attempt 1: schedule[0] = 5, attempt 2: schedule[1] = 10.
+    const bad = [successResultMessage("{bad json}")];
+    const ok = [successResultMessage("", STRUCTURED_PASS_VERDICT)];
+    setAttemptsToSequence([bad, bad, ok]);
+    const result = yield* new AnthropicJudgeBackend({
+      retrySchedule: [5, 10],
+      perAttemptTimeoutMs: 500,
+    }).judge(input());
+    expect(result.retryCount).toBe(RETRY_TWO);
+    expect(result.pass).toBe(true);
+  }, 10_000);
+
+  itEffect("loop body fires for attempt 0 (no sleep, no crash)", function* () {
+    // Kill EqualityOperator at L385: attempt <= schedule.length must be true for attempt=0.
+    // Kill ConditionalExpression at L385: attempt > 0 must be false for attempt=0.
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    const result = yield* new AnthropicJudgeBackend({
+      retrySchedule: [100, 200],
+    }).judge(input());
+    expect(result.retryCount).toBe(RETRY_ZERO);
+    expect(result.pass).toBe(true);
+  });
+});
+
+// ── buildResult non-object verdict + abort signal ────────────────────────────
+describe("AnthropicJudgeBackend buildResult non-object + abort signal NoCoverage", () => {
+  itEffect("non-object structured_output (string) produces SchemaInvalid fallback", function* () {
+    // Kill L228-229: typeof value !== "object" path in buildResult.
+    setAttemptsToSequence([[successResultMessage("ignored", "not an object")]]);
+    const result = yield* new AnthropicJudgeBackend({
+      retrySchedule: [],
+      perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
+    }).judge(input());
+    expect(result.pass).toBe(false);
+    expect(result.overallSeverity).toBe(ISSUE_SEVERITY.Critical);
+    expect(result.issues[0]?.issue).toMatch(/SchemaInvalid|verdict is not an object/u);
+  }, 10_000);
+
+  itEffect("null structured_output falls to text path, not non-object branch", function* () {
+    // structured_output=null goes to text path (not buildResult), so L229 stays NoCoverage.
+    // This test confirms null is handled correctly even if it can't kill L228-229.
+    setAttemptsToSequence([[successResultMessage(JSON.stringify(VERDICT_PASS), null)]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.pass).toBe(true);
+  });
+
+  itEffect("pre-aborted signal still completes first attempt", function* () {
+    // Kill L337-339: parentSignal.aborted → abortController.abort() path.
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    const controller = new AbortController();
+    controller.abort();
+    const judgeInput = { ...input(), abortSignal: controller.signal };
+    const result = yield* new AnthropicJudgeBackend({
+      retrySchedule: [],
+      perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
+    }).judge(judgeInput);
+    expect(result.pass).toBe(true);
+  }, 10_000);
+});

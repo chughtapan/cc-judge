@@ -638,3 +638,149 @@ describe("scenarioLoader — parseFailure error tag and path", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Mutation-survivor killers — targeted tests that exercise specific code paths
+// to eliminate survived mutants reported by Stryker.
+// ---------------------------------------------------------------------------
+
+describe("scenarioLoader — globEff cwd branch uses absolute: true (kills L35:82)", () => {
+  // When resolvePaths detects a directory, it calls globEff(pattern, abs) with
+  // cwd=abs. If absolute were false (L35:82 BooleanLiteral mutant), glob would
+  // return paths relative to abs, which would not resolve from the actual CWD.
+  // With absolute:true the returned paths are absolute and loadOne succeeds.
+  itEffect("loading a directory with a yaml file in a subdirectory succeeds (absolute paths required)", function* () {
+    const dir = tmpScenarioDir();
+    const subDir = path.join(dir, "nested");
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(path.join(subDir, "deep.yaml"), YAML_MINIMAL("deep-scen"), "utf8");
+    // No yaml directly in dir, only in sub — requires ** glob with cwd=dir
+    const scenarios = yield* scenarioLoader.loadFromPath(dir);
+    expect(scenarios).toHaveLength(1);
+    expect(scenarios[0].id).toBe("deep-scen");
+  });
+});
+
+describe("scenarioLoader — globEff else branch (kills L35:91, L35:103, L35:116)", () => {
+  // When no cwd is given (glob pattern path), globEff uses { absolute: true, nodir: true }.
+  // ObjectLiteral mutant (L35:91) replaces this with {}.
+  // BooleanLiteral mutants: absolute→false (L35:103), nodir→false (L35:116).
+
+  // Kill L35:103 (absolute:false) — with absolute:false, paths would be relative.
+  // We load via glob pattern and verify the loaded scenario is correct; if paths were
+  // relative to CWD instead of absolute, readFile would fail on the relative path.
+  itEffect("glob pattern from non-CWD directory loads correctly (absolute:true required)", function* () {
+    const dir = tmpScenarioDir();
+    writeFileSync(path.join(dir, "abs-test.yaml"), YAML_MINIMAL("abs-test"), "utf8");
+    // Use a glob pattern — this hits the else branch of globEff (no cwd)
+    const pattern = path.join(dir, "abs-*.yaml");
+    const result = yield* Effect.either(scenarioLoader.loadFromPath(pattern));
+    expect(result._tag).toBe(EITHER_RIGHT);
+    if (result._tag === EITHER_RIGHT) {
+      expect(result.right).toHaveLength(1);
+      expect(result.right[0].id).toBe("abs-test");
+    }
+  });
+
+  // Kill L35:116 (nodir:false) — with nodir:false, a directory matching the glob
+  // would be included in results, then loadOne would fail with "unsupported extension"
+  // because the directory has no file extension.
+  itEffect("glob pattern does not attempt to load directories as files (nodir:true required)", function* () {
+    const dir = tmpScenarioDir();
+    writeFileSync(path.join(dir, "real.yaml"), YAML_MINIMAL("nodir-test"), "utf8");
+    mkdirSync(path.join(dir, "bogus-dir.yaml"), { recursive: true });
+    // Glob pattern matches both "real.yaml" and "bogus-dir.yaml" (the directory).
+    // With nodir:true, only "real.yaml" is returned → success.
+    // With nodir:false, "bogus-dir.yaml" directory is included → loadOne fails.
+    const pattern = path.join(dir, "*.yaml");
+    const result = yield* Effect.either(scenarioLoader.loadFromPath(pattern));
+    expect(result._tag).toBe(EITHER_RIGHT);
+    if (result._tag === EITHER_RIGHT) {
+      expect(result.right).toHaveLength(1);
+      expect(result.right[0].id).toBe("nodir-test");
+    }
+  });
+});
+
+describe("scenarioLoader — globEff sort stability (kills L37 MethodExpression)", () => {
+  // MethodExpression mutant replaces m.slice().sort() with just m.
+  // Without sort, glob results may come back in filesystem/creation order.
+  // We write files in reverse-alphabetical order and verify sorted output.
+  itEffect("glob pattern results are returned in sorted path order", function* () {
+    const dir = tmpScenarioDir();
+    // Write in reverse alphabetical order to maximize chance of unsorted filesystem return
+    writeFileSync(path.join(dir, "z-sort.yaml"), YAML_MINIMAL("sort-z-glob"), "utf8");
+    writeFileSync(path.join(dir, "m-sort.yaml"), YAML_MINIMAL("sort-m-glob"), "utf8");
+    writeFileSync(path.join(dir, "a-sort.yaml"), YAML_MINIMAL("sort-a-glob"), "utf8");
+    // Use glob pattern (hits the no-cwd else branch of globEff)
+    const pattern = path.join(dir, "*-sort.yaml");
+    const scenarios = yield* scenarioLoader.loadFromPath(pattern);
+    expect(scenarios.map((s) => s.id)).toEqual(["sort-a-glob", "sort-m-glob", "sort-z-glob"]);
+  });
+});
+
+describe("scenarioLoader — normalizeTsScenario candidate type guard (kills L142)", () => {
+  // ConditionalExpression mutant replaces candidate === null || typeof candidate !== "object"
+  // with false. When the candidate is a string (export default "not-an-object"), the guard
+  // should catch it and return ParseFailure. If mutated to false, the code proceeds and
+  // produces SchemaInvalid instead.
+  itEffect("string default export produces ParseFailure (not SchemaInvalid)", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "string-export.ts");
+    writeFileSync(file, `export default "i-am-a-string";\n`, "utf8");
+    const result = yield* Effect.either(scenarioLoader.loadFromPath(file));
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT) {
+      // With the guard active: ParseFailure "not an object"
+      // With the guard mutated to false: SchemaInvalid (because Object.entries on a string
+      // produces character-index keys that don't match the schema)
+      expect(result.left.cause._tag).toBe(PARSE_FAILURE_TAG);
+    }
+  });
+
+  // Also test with a number export
+  itEffect("number default export produces ParseFailure", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "number-export.ts");
+    writeFileSync(file, `export default 42;\n`, "utf8");
+    const result = yield* Effect.either(scenarioLoader.loadFromPath(file));
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT) {
+      expect(result.left.cause._tag).toBe(PARSE_FAILURE_TAG);
+    }
+  });
+});
+
+describe("scenarioLoader — passCheck/failCheck property absence (kills L187, L190)", () => {
+  // ConditionalExpression mutants on L187/L190 replace passCheck !== undefined / failCheck
+  // !== undefined with true. This causes the spread to always set deterministicPassCheck
+  // and deterministicFailCheck on the scenario object (to undefined). Without mutation,
+  // these keys are absent from the object entirely.
+  itEffect("scenario without checks does not have deterministicPassCheck property on the object", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "no-prop-check.ts");
+    writeFileSync(file, `export default ${MINIMAL_TS_SCENARIO_BODY};\n`, "utf8");
+    const scenarios = yield* scenarioLoader.loadFromPath(file);
+    expect(scenarios).toHaveLength(1);
+    // Key distinction: the property must not EXIST on the object, not just be undefined.
+    // With the mutation, the spread sets it to undefined, so "in" returns true.
+    expect("deterministicPassCheck" in scenarios[0]).toBe(false);
+    expect("deterministicFailCheck" in scenarios[0]).toBe(false);
+  });
+
+  itEffect("scenario with only passCheck has failCheck property absent", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "only-pass.ts");
+    const body = MINIMAL_TS_SCENARIO_BODY.replace(TS_SCEN_ID, "only-pass");
+    writeFileSync(
+      file,
+      `export default { ...${body}, deterministicPassCheck: () => true };\n`,
+      "utf8",
+    );
+    const scenarios = yield* scenarioLoader.loadFromPath(file);
+    expect(scenarios).toHaveLength(1);
+    expect(typeof scenarios[0].deterministicPassCheck).toBe("function");
+    // failCheck should not be a property on the object at all
+    expect("deterministicFailCheck" in scenarios[0]).toBe(false);
+  });
+});

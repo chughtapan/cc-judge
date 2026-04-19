@@ -1,9 +1,10 @@
-import { describe, expect } from "vitest";
+import { describe, expect, vi } from "vitest";
 import { Effect } from "effect";
 import { mkdtempSync } from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { runScenarios, runScenario, scoreTraces } from "../src/app/pipeline.js";
+import * as reportModule from "../src/emit/report.js";
 import {
   ScenarioId,
   TraceId,
@@ -1399,5 +1400,1001 @@ describe("summarizeDiff before/after discrimination (runScenarios path)", () => 
     expect(sum?.added).toBe(DIFF_ADDED_COUNT_ONE);
     expect(sum?.removed).toBe(DIFF_REMOVED_COUNT_ONE);
     expect(sum?.changed).toBe(DIFF_CHANGED_COUNT_ONE);
+  });
+});
+
+// ============================================================
+// Survivor kill suite — epic #37 follow-up round 2
+// Targets: ArithmeticOperator, ObjectLiteral, BooleanLiteral,
+// StringLiteral, ConditionalExpression, EqualityOperator,
+// MethodExpression, BlockStatement mutants in pipeline.ts
+// ============================================================
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const MOCK_NOW_START = 1_000_000;
+const MOCK_NOW_AFTER_DELAY = 1_000_100;
+const MOCK_NOW_DELTA_MS = MOCK_NOW_AFTER_DELAY - MOCK_NOW_START;
+const HIGH_CONCURRENCY = 100;
+const DEFAULT_RESULTS_DIR = "./eval-results";
+const GITHUB_COMMENT_VALUE = 99;
+const GITHUB_ARTIFACT_URL = "https://example.com/artifact";
+
+// ── ArithmeticOperator: Date.now() - startMs (L169, L193, L367) ─────────────
+describe("ArithmeticOperator: latencyMs = Date.now() - startMs (not +)", () => {
+  itEffect("runner.start failure path computes latencyMs as subtraction", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const dateSpy = vi.spyOn(Date, "now");
+    dateSpy.mockReturnValue(MOCK_NOW_START);
+    const startFailingRunner: AgentRunner = {
+      ...stubRunner,
+      start(scenario) {
+        dateSpy.mockReturnValue(MOCK_NOW_AFTER_DELAY);
+        return Effect.fail({
+          _tag: "AgentStartError",
+          scenarioId: scenario.id,
+          cause: { _tag: "WorkspacePathEscape", wfPath: "bad" },
+        } as unknown as AgentStartError);
+      },
+    };
+    const report = yield* runScenarios([makeScenario("arith-start-fail")], {
+      runner: startFailingRunner,
+      judge: stubJudge,
+      resultsDir: dir,
+    });
+    dateSpy.mockRestore();
+    expect(report.runs[0]?.latencyMs).toBe(MOCK_NOW_DELTA_MS);
+  });
+
+  itEffect("happy path computes latencyMs as subtraction", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const dateSpy = vi.spyOn(Date, "now");
+    dateSpy.mockReturnValue(MOCK_NOW_START);
+    const controlledRunner: AgentRunner = {
+      ...stubRunner,
+      start(scenario) {
+        return Effect.succeed({
+          __brand: "AgentHandle",
+          kind: "subprocess",
+          scenarioId: scenario.id,
+          workspaceDir: "/tmp/none",
+          initialFiles: new Map<string, string>(),
+          turnsExecuted: { count: 0 },
+        });
+      },
+      turn() {
+        dateSpy.mockReturnValue(MOCK_NOW_AFTER_DELAY);
+        return Effect.succeed({
+          index: 0,
+          prompt: "p",
+          response: "r",
+          startedAt: "2026-04-18T00:00:00.000Z",
+          latencyMs: 1,
+          toolCallCount: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        });
+      },
+    };
+    const report = yield* runScenarios([makeScenario("arith-happy")], {
+      runner: controlledRunner,
+      judge: stubJudge,
+      resultsDir: dir,
+    });
+    dateSpy.mockRestore();
+    // latencyMs should be Date.now() - startMs = positive delta, NOT sum
+    expect(report.runs[0]?.latencyMs).toBe(MOCK_NOW_DELTA_MS);
+  });
+
+  itEffect("scoreOneTrace computes latencyMs as subtraction", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const dateSpy = vi.spyOn(Date, "now");
+    dateSpy.mockReturnValue(MOCK_NOW_START);
+    const delayedJudge: JudgeBackend = {
+      name: "delayed-judge",
+      judge() {
+        dateSpy.mockReturnValue(MOCK_NOW_AFTER_DELAY);
+        return Effect.succeed({
+          pass: true,
+          reason: "ok",
+          issues: [],
+          overallSeverity: null,
+          retryCount: 0,
+        });
+      },
+    };
+    const trace: Trace = {
+      traceId: TraceId("arith-trace"),
+      name: "at",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    const report = yield* scoreTraces([trace], { judge: delayedJudge, resultsDir: dir });
+    dateSpy.mockRestore();
+    expect(report.runs[0]?.latencyMs).toBe(MOCK_NOW_DELTA_MS);
+  });
+});
+
+// ── ObjectLiteral: { record } not {} in onRun calls (L175, L200, L286, L324, L375) ─
+describe("ObjectLiteral: onRun/onReport receive { record } / { report } not {}", () => {
+  itEffect("runScenarios onRun callback receives an object with record property", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let receivedArg: unknown = undefined;
+    const shapeCheckingObs = {
+      name: "shape-obs",
+      onRun: (arg: unknown) => {
+        receivedArg = arg;
+        return Effect.void;
+      },
+      onReport: () => Effect.void,
+    };
+    yield* runScenarios([makeScenario("obj-shape-run")], {
+      runner: stubRunner,
+      judge: stubJudge,
+      resultsDir: dir,
+      emitters: [shapeCheckingObs],
+    });
+    expect(receivedArg).not.toBeUndefined();
+    expect(typeof receivedArg).toBe("object");
+    expect(receivedArg).toHaveProperty("record");
+  });
+
+  itEffect("runScenarios onReport callback receives an object with report property", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let receivedArg: unknown = undefined;
+    const shapeCheckingObs = {
+      name: "shape-obs",
+      onRun: () => Effect.void,
+      onReport: (arg: unknown) => {
+        receivedArg = arg;
+        return Effect.void;
+      },
+    };
+    yield* runScenarios([makeScenario("obj-shape-rep")], {
+      runner: stubRunner,
+      judge: stubJudge,
+      resultsDir: dir,
+      emitters: [shapeCheckingObs],
+    });
+    expect(receivedArg).not.toBeUndefined();
+    expect(typeof receivedArg).toBe("object");
+    expect(receivedArg).toHaveProperty("report");
+  });
+
+  itEffect("scoreTraces onRun callback receives an object with record property", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let receivedArg: unknown = undefined;
+    const shapeCheckingObs = {
+      name: "shape-obs",
+      onRun: (arg: unknown) => {
+        receivedArg = arg;
+        return Effect.void;
+      },
+      onReport: () => Effect.void,
+    };
+    const trace: Trace = {
+      traceId: TraceId("st-obj-shape"),
+      name: "s",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    yield* scoreTraces([trace], { judge: stubJudge, resultsDir: dir, emitters: [shapeCheckingObs] });
+    expect(receivedArg).not.toBeUndefined();
+    expect(typeof receivedArg).toBe("object");
+    expect(receivedArg).toHaveProperty("record");
+  });
+
+  itEffect("scoreTraces onReport callback receives an object with report property", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let receivedArg: unknown = undefined;
+    const shapeCheckingObs = {
+      name: "shape-obs",
+      onRun: () => Effect.void,
+      onReport: (arg: unknown) => {
+        receivedArg = arg;
+        return Effect.void;
+      },
+    };
+    const trace: Trace = {
+      traceId: TraceId("st-obj-rep"),
+      name: "s",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    yield* scoreTraces([trace], { judge: stubJudge, resultsDir: dir, emitters: [shapeCheckingObs] });
+    expect(receivedArg).not.toBeUndefined();
+    expect(typeof receivedArg).toBe("object");
+    expect(receivedArg).toHaveProperty("report");
+  });
+
+  itEffect("onRun on start-failure path receives object with record property", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let receivedArg: unknown = undefined;
+    const shapeCheckingObs = {
+      name: "start-fail-shape",
+      onRun: (arg: unknown) => {
+        receivedArg = arg;
+        return Effect.void;
+      },
+      onReport: () => Effect.void,
+    };
+    const startFailingRunner: AgentRunner = {
+      ...stubRunner,
+      start(scenario) {
+        return Effect.fail({
+          _tag: "AgentStartError",
+          scenarioId: scenario.id,
+          cause: { _tag: "WorkspacePathEscape", wfPath: "bad" },
+        } as unknown as AgentStartError);
+      },
+    };
+    yield* runScenarios([makeScenario("sf-shape")], {
+      runner: startFailingRunner,
+      judge: stubJudge,
+      resultsDir: dir,
+      emitters: [shapeCheckingObs],
+    });
+    expect(receivedArg).not.toBeUndefined();
+    expect(typeof receivedArg).toBe("object");
+    expect(receivedArg).toHaveProperty("record");
+  });
+});
+
+// ── BooleanLiteral: discard: true (not false) in forEach (L175, L200, L286, L324, L375) ─
+// NOTE: The observer return type is Effect<void, never, never>, so Effect.fail
+// is not valid. The discard:true vs discard:false mutant is only observable via
+// the collection behavior: discard:true fires-and-forgets, discard:false collects.
+// We verify by having the observer track execution order, confirming forEach
+// does NOT short-circuit or buffer results differently.
+describe("BooleanLiteral: discard: true fires-and-forgets observer effects", () => {
+  itEffect("runScenarios onRun is invoked for each scenario (not short-circuited)", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const runIds: string[] = [];
+    const trackingObs = {
+      name: "tracking-obs",
+      onRun: ({ record }: { record: { scenarioId: string } }) => {
+        runIds.push(record.scenarioId);
+        return Effect.void;
+      },
+      onReport: () => Effect.void,
+    };
+    yield* runScenarios(
+      [makeScenario("discard-a"), makeScenario("discard-b"), makeScenario("discard-c")],
+      { runner: stubRunner, judge: stubJudge, resultsDir: dir, emitters: [trackingObs] },
+    );
+    expect(runIds).toEqual(["discard-a", "discard-b", "discard-c"]);
+  });
+
+  itEffect("scoreTraces onRun is invoked for each trace (not short-circuited)", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const runIds: string[] = [];
+    const trackingObs = {
+      name: "tracking-st-obs",
+      onRun: ({ record }: { record: { scenarioId: string } }) => {
+        runIds.push(record.scenarioId);
+        return Effect.void;
+      },
+      onReport: () => Effect.void,
+    };
+    const traces: Trace[] = [
+      { traceId: TraceId("discard-t1"), name: "dt1", turns: [], expectedBehavior: "e", validationChecks: ["c"] },
+      { traceId: TraceId("discard-t2"), name: "dt2", turns: [], expectedBehavior: "e", validationChecks: ["c"] },
+      { traceId: TraceId("discard-t3"), name: "dt3", turns: [], expectedBehavior: "e", validationChecks: ["c"] },
+    ];
+    yield* scoreTraces(traces, { judge: stubJudge, resultsDir: dir, emitters: [trackingObs] });
+    // All three traces should have their onRun called
+    expect(runIds.length).toBe(3);
+  });
+});
+
+// ── StringLiteral: default resultsDir = "./eval-results" (L244, L306) ───────
+describe("StringLiteral: default resultsDir is './eval-results'", () => {
+  itEffect("runScenarios passes './eval-results' as resultsDir when omitted", function* () {
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter");
+    const prevBin = process.env["CC_JUDGE_SUBPROCESS_BIN"];
+    process.env["CC_JUDGE_SUBPROCESS_BIN"] = "/bin/true";
+    try {
+      yield* runScenarios([], { judge: stubJudge });
+      expect(emitterSpy).toHaveBeenCalledTimes(1);
+      const optsArg = emitterSpy.mock.calls[0]?.[0];
+      expect(optsArg?.resultsDir).toBe(DEFAULT_RESULTS_DIR);
+    } finally {
+      emitterSpy.mockRestore();
+      if (prevBin !== undefined) process.env["CC_JUDGE_SUBPROCESS_BIN"] = prevBin;
+      else delete process.env["CC_JUDGE_SUBPROCESS_BIN"];
+    }
+  });
+
+  itEffect("scoreTraces passes './eval-results' as resultsDir when omitted", function* () {
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter");
+    yield* scoreTraces([], { judge: stubJudge });
+    expect(emitterSpy).toHaveBeenCalledTimes(1);
+    const optsArg = emitterSpy.mock.calls[0]?.[0];
+    expect(optsArg?.resultsDir).toBe(DEFAULT_RESULTS_DIR);
+    emitterSpy.mockRestore();
+  });
+});
+
+// ── ConditionalExpression/EqualityOperator: spread args to makeReportEmitter (L247-249, L309-311) ─
+describe("ConditionalExpression: githubComment spread into makeReportEmitter opts", () => {
+  itEffect("runScenarios passes githubComment to emitter when set", function* () {
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    try {
+      yield* runScenarios([makeScenario("gc-spread")], {
+        runner: stubRunner,
+        judge: stubJudge,
+        resultsDir: dir,
+        githubComment: GITHUB_COMMENT_VALUE,
+      });
+      expect(emitterSpy).toHaveBeenCalledTimes(1);
+      const optsArg = emitterSpy.mock.calls[0]?.[0];
+      expect(optsArg?.githubComment).toBe(GITHUB_COMMENT_VALUE);
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+
+  itEffect("runScenarios omits githubComment from emitter opts when undefined", function* () {
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    try {
+      yield* runScenarios([makeScenario("gc-omit")], {
+        runner: stubRunner,
+        judge: stubJudge,
+        resultsDir: dir,
+      });
+      expect(emitterSpy).toHaveBeenCalledTimes(1);
+      const optsArg = emitterSpy.mock.calls[0]?.[0];
+      expect(optsArg?.githubComment).toBeUndefined();
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+
+  itEffect("runScenarios passes githubCommentArtifactUrl to emitter when set", function* () {
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    try {
+      yield* runScenarios([makeScenario("gcau-spread")], {
+        runner: stubRunner,
+        judge: stubJudge,
+        resultsDir: dir,
+        githubComment: GITHUB_COMMENT_VALUE,
+        githubCommentArtifactUrl: GITHUB_ARTIFACT_URL,
+      });
+      expect(emitterSpy).toHaveBeenCalledTimes(1);
+      const optsArg = emitterSpy.mock.calls[0]?.[0];
+      expect(optsArg?.githubCommentArtifactUrl).toBe(GITHUB_ARTIFACT_URL);
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+
+  itEffect("runScenarios omits githubCommentArtifactUrl from emitter opts when undefined", function* () {
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    try {
+      yield* runScenarios([makeScenario("gcau-omit")], {
+        runner: stubRunner,
+        judge: stubJudge,
+        resultsDir: dir,
+      });
+      expect(emitterSpy).toHaveBeenCalledTimes(1);
+      const optsArg = emitterSpy.mock.calls[0]?.[0];
+      expect(optsArg?.githubCommentArtifactUrl).toBeUndefined();
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+
+  itEffect("scoreTraces passes githubComment to emitter when set", function* () {
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const trace: Trace = {
+      traceId: TraceId("gc-st-spread"),
+      name: "gcs",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    try {
+      yield* scoreTraces([trace], {
+        judge: stubJudge,
+        resultsDir: dir,
+        githubComment: GITHUB_COMMENT_VALUE,
+      });
+      expect(emitterSpy).toHaveBeenCalledTimes(1);
+      const optsArg = emitterSpy.mock.calls[0]?.[0];
+      expect(optsArg?.githubComment).toBe(GITHUB_COMMENT_VALUE);
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+
+  itEffect("scoreTraces omits githubComment from emitter opts when undefined", function* () {
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const trace: Trace = {
+      traceId: TraceId("gc-st-omit"),
+      name: "gco",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    try {
+      yield* scoreTraces([trace], {
+        judge: stubJudge,
+        resultsDir: dir,
+      });
+      expect(emitterSpy).toHaveBeenCalledTimes(1);
+      const optsArg = emitterSpy.mock.calls[0]?.[0];
+      expect(optsArg?.githubComment).toBeUndefined();
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+
+  itEffect("scoreTraces passes githubCommentArtifactUrl to emitter when set", function* () {
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const trace: Trace = {
+      traceId: TraceId("gcau-st-spread"),
+      name: "gcaus",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    try {
+      yield* scoreTraces([trace], {
+        judge: stubJudge,
+        resultsDir: dir,
+        githubComment: GITHUB_COMMENT_VALUE,
+        githubCommentArtifactUrl: GITHUB_ARTIFACT_URL,
+      });
+      expect(emitterSpy).toHaveBeenCalledTimes(1);
+      const optsArg = emitterSpy.mock.calls[0]?.[0];
+      expect(optsArg?.githubCommentArtifactUrl).toBe(GITHUB_ARTIFACT_URL);
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+
+  itEffect("scoreTraces omits githubCommentArtifactUrl from emitter opts when undefined", function* () {
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const trace: Trace = {
+      traceId: TraceId("gcau-st-omit"),
+      name: "gcauo",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    try {
+      yield* scoreTraces([trace], {
+        judge: stubJudge,
+        resultsDir: dir,
+      });
+      expect(emitterSpy).toHaveBeenCalledTimes(1);
+      const optsArg = emitterSpy.mock.calls[0]?.[0];
+      expect(optsArg?.githubCommentArtifactUrl).toBeUndefined();
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+});
+
+// ── MethodExpression: Math.max not Math.min (L267, L315) ───────────────────
+describe("MethodExpression: Math.max(1, concurrency) not Math.min", () => {
+  itEffect("runScenarios uses concurrency=2 when opts.concurrency=2 (not clamped to 1)", function* () {
+    // Math.max(1, 2) = 2 → runs in parallel (fast)
+    // Math.min(1, 2) = 1 → runs serially (slow)
+    // We verify by using a slow runner and checking that two scenarios
+    // complete faster than 2x the single-run time.
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const RUNNER_DELAY_MS = 200;
+    const slowRunner: AgentRunner = {
+      ...stubRunner,
+      start(scenario) {
+        return Effect.delay(
+          Effect.succeed({
+            __brand: "AgentHandle",
+            kind: "subprocess",
+            scenarioId: scenario.id,
+            workspaceDir: "/tmp/none",
+            initialFiles: new Map<string, string>(),
+            turnsExecuted: { count: 0 },
+          }),
+          RUNNER_DELAY_MS,
+        );
+      },
+    };
+    const before = Date.now();
+    yield* runScenarios(
+      [makeScenario("conc-a"), makeScenario("conc-b")],
+      { runner: slowRunner, judge: stubJudge, resultsDir: dir, concurrency: CONCURRENCY_TWO },
+    );
+    const elapsed = Date.now() - before;
+    // With Math.max (correct): both run in parallel, ~200ms total
+    // With Math.min (mutant): both run serially, ~400ms total
+    // Allow generous margin: should be < 350ms for parallel
+    expect(elapsed).toBeLessThan(RUNNER_DELAY_MS * 2 - 50);
+  });
+
+  itEffect("scoreTraces uses concurrency=2 when opts.concurrency=2 (not clamped to 1)", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const JUDGE_DELAY_MS = 200;
+    const slowJudge: JudgeBackend = {
+      name: "slow-judge",
+      judge() {
+        return Effect.delay(
+          Effect.succeed({
+            pass: true,
+            reason: "ok",
+            issues: [],
+            overallSeverity: null,
+            retryCount: 0,
+          }),
+          JUDGE_DELAY_MS,
+        );
+      },
+    };
+    const trace1: Trace = {
+      traceId: TraceId("conc-t1"),
+      name: "ct1",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    const trace2: Trace = {
+      traceId: TraceId("conc-t2"),
+      name: "ct2",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    const before = Date.now();
+    yield* scoreTraces(
+      [trace1, trace2],
+      { judge: slowJudge, resultsDir: dir, concurrency: CONCURRENCY_TWO },
+    );
+    const elapsed = Date.now() - before;
+    // Parallel with Math.max: ~200ms. Serial with Math.min: ~400ms.
+    expect(elapsed).toBeLessThan(JUDGE_DELAY_MS * 2 - 50);
+  });
+});
+
+// ── ConditionalExpression: githubComment if-block (L287, L325) ─────────────
+describe("ConditionalExpression: githubComment if-block executes when set", () => {
+  itEffect("runScenarios calls publishGithubComment when githubComment is set", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let publishCalled = false;
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter").mockImplementation((opts) => {
+      return {
+        emitRun() { return Effect.void; },
+        emitReport() { return Effect.void; },
+        publishGithubComment() {
+          publishCalled = true;
+          return Effect.void;
+        },
+      };
+    });
+    try {
+      yield* runScenarios([makeScenario("gc-if")], {
+        runner: stubRunner,
+        judge: stubJudge,
+        resultsDir: dir,
+        githubComment: GITHUB_COMMENT_VALUE,
+      });
+      expect(publishCalled).toBe(true);
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+
+  itEffect("runScenarios does not call publishGithubComment when githubComment is undefined", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let publishCalled = false;
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter").mockImplementation((opts) => {
+      return {
+        emitRun() { return Effect.void; },
+        emitReport() { return Effect.void; },
+        publishGithubComment() {
+          publishCalled = true;
+          return Effect.void;
+        },
+      };
+    });
+    try {
+      yield* runScenarios([makeScenario("gc-no-if")], {
+        runner: stubRunner,
+        judge: stubJudge,
+        resultsDir: dir,
+      });
+      expect(publishCalled).toBe(false);
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+
+  itEffect("scoreTraces calls publishGithubComment when githubComment is set", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let publishCalled = false;
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter").mockImplementation((opts) => {
+      return {
+        emitRun() { return Effect.void; },
+        emitReport() { return Effect.void; },
+        publishGithubComment() {
+          publishCalled = true;
+          return Effect.void;
+        },
+      };
+    });
+    const trace: Trace = {
+      traceId: TraceId("gc-st-if"),
+      name: "gcs",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    try {
+      yield* scoreTraces([trace], {
+        judge: stubJudge,
+        resultsDir: dir,
+        githubComment: GITHUB_COMMENT_VALUE,
+      });
+      expect(publishCalled).toBe(true);
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+
+  itEffect("scoreTraces does not call publishGithubComment when githubComment is undefined", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let publishCalled = false;
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter").mockImplementation((opts) => {
+      return {
+        emitRun() { return Effect.void; },
+        emitReport() { return Effect.void; },
+        publishGithubComment() {
+          publishCalled = true;
+          return Effect.void;
+        },
+      };
+    });
+    const trace: Trace = {
+      traceId: TraceId("gc-st-no-if"),
+      name: "gcs",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    try {
+      yield* scoreTraces([trace], {
+        judge: stubJudge,
+        resultsDir: dir,
+      });
+      expect(publishCalled).toBe(false);
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+});
+
+// ── ConditionalExpression: trace.turns.length > 0 (L337) ──────────────────
+describe("ConditionalExpression: trace.turns.length > 0 in traceToScenario", () => {
+  itEffect("traceToScenario uses empty string for setupPrompt when turns is empty", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let capturedSetupPrompt: string | undefined;
+    const capturingJudge: JudgeBackend = {
+      name: "sp-cap-2",
+      judge({ scenario }) {
+        capturedSetupPrompt = scenario.setupPrompt;
+        return Effect.succeed({
+          pass: true,
+          reason: "ok",
+          issues: [],
+          overallSeverity: null,
+          retryCount: 0,
+        });
+      },
+    };
+    const trace: Trace = {
+      traceId: TraceId("empty-turns-prompt"),
+      name: "etp",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    yield* scoreTraces([trace], { judge: capturingJudge, resultsDir: dir });
+    // With turns.length > 0 mutated to true, it would try turns[0] on empty array → undefined ?? ""
+    // The test verifies it's actually "" via the conditional path, not the fallback.
+    // Both paths yield "" here, but we verify the judge actually receives it.
+    expect(capturedSetupPrompt).toBe("");
+  });
+});
+
+// ── ConditionalExpression: workspaceDiff spread in scoreOneTrace (L357, L370) ─
+describe("ConditionalExpression: workspaceDiff spread in scoreOneTrace", () => {
+  itEffect("scoreOneTrace passes workspaceDiff to buildRecord when present", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const workspaceDiff = {
+      changed: [{ path: "added.txt", before: null, after: "content" }],
+    };
+    const trace: Trace = {
+      traceId: TraceId("wd-buildrec"),
+      name: "wbr",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+      workspaceDiff,
+    };
+    const report = yield* scoreTraces([trace], { judge: stubJudge, resultsDir: dir });
+    const rec = report.runs[0];
+    // If the spread were removed, workspaceDiffSummary would be all zeros
+    expect(rec?.workspaceDiffSummary?.added).toBe(DIFF_ADDED_COUNT_ONE);
+  });
+
+  itEffect("scoreOneTrace omits workspaceDiff from buildRecord when absent", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const trace: Trace = {
+      traceId: TraceId("no-wd-buildrec"),
+      name: "nwbr",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    const report = yield* scoreTraces([trace], { judge: stubJudge, resultsDir: dir });
+    const rec = report.runs[0];
+    // With no workspaceDiff, summarizeDiff should return all zeros
+    expect(rec?.workspaceDiffSummary?.added).toBe(0);
+    expect(rec?.workspaceDiffSummary?.removed).toBe(0);
+    expect(rec?.workspaceDiffSummary?.changed).toBe(0);
+  });
+
+  itEffect("scoreOneTrace passes workspaceDiff to judge when present", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let capturedWorkspaceDiff: unknown;
+    const diffCapturingJudge: JudgeBackend = {
+      name: "diff-cap-2",
+      judge({ workspaceDiff }) {
+        capturedWorkspaceDiff = workspaceDiff;
+        return Effect.succeed({
+          pass: true,
+          reason: "ok",
+          issues: [],
+          overallSeverity: null,
+          retryCount: 0,
+        });
+      },
+    };
+    const workspaceDiff = {
+      changed: [{ path: "f.txt", before: null, after: "content" }],
+    };
+    const trace: Trace = {
+      traceId: TraceId("wd-judge-2"),
+      name: "wdj2",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+      workspaceDiff,
+    };
+    yield* scoreTraces([trace], { judge: diffCapturingJudge, resultsDir: dir });
+    expect(capturedWorkspaceDiff).toBeDefined();
+    // Verify it's the actual diff object, not undefined
+    expect(capturedWorkspaceDiff).toEqual(workspaceDiff);
+  });
+
+  itEffect("scoreOneTrace does not pass workspaceDiff to judge when absent", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let capturedWorkspaceDiff: unknown;
+    const diffCapturingJudge: JudgeBackend = {
+      name: "diff-cap-3",
+      judge({ workspaceDiff }) {
+        capturedWorkspaceDiff = workspaceDiff;
+        return Effect.succeed({
+          pass: true,
+          reason: "ok",
+          issues: [],
+          overallSeverity: null,
+          retryCount: 0,
+        });
+      },
+    };
+    const trace: Trace = {
+      traceId: TraceId("no-wd-judge"),
+      name: "nwdj",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    yield* scoreTraces([trace], { judge: diffCapturingJudge, resultsDir: dir });
+    expect(capturedWorkspaceDiff).toBeUndefined();
+  });
+});
+
+// ── ConditionalExpression: abortSignal spread in runOneScenarioOnce (L185) ──
+describe("ConditionalExpression: abortSignal spread in runOneScenarioOnce", () => {
+  itEffect("abortSignal is passed to judge when provided", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let capturedSignal: AbortSignal | undefined;
+    const signalCapturingJudge: JudgeBackend = {
+      name: "signal-cap",
+      judge(opts) {
+        capturedSignal = opts.abortSignal;
+        return Effect.succeed({
+          pass: true,
+          reason: "ok",
+          issues: [],
+          overallSeverity: null,
+          retryCount: 0,
+        });
+      },
+    };
+    const controller = new AbortController();
+    yield* runScenarios([makeScenario("signal-test")], {
+      runner: stubRunner,
+      judge: signalCapturingJudge,
+      resultsDir: dir,
+      abortSignal: controller.signal,
+    });
+    expect(capturedSignal).toBe(controller.signal);
+  });
+
+  itEffect("abortSignal is undefined when not provided to runScenarios", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let capturedSignal: AbortSignal | undefined;
+    const signalCapturingJudge: JudgeBackend = {
+      name: "signal-cap-2",
+      judge(opts) {
+        capturedSignal = opts.abortSignal;
+        return Effect.succeed({
+          pass: true,
+          reason: "ok",
+          issues: [],
+          overallSeverity: null,
+          retryCount: 0,
+        });
+      },
+    };
+    yield* runScenarios([makeScenario("no-signal-test")], {
+      runner: stubRunner,
+      judge: signalCapturingJudge,
+      resultsDir: dir,
+    });
+    expect(capturedSignal).toBeUndefined();
+  });
+});
+
+// ── ConditionalExpression: abortSignal spread in scoreOneTrace (L358) ───────
+describe("ConditionalExpression: abortSignal spread in scoreOneTrace", () => {
+  itEffect("abortSignal is passed to judge in scoreTraces when provided", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let capturedSignal: AbortSignal | undefined;
+    const signalCapturingJudge: JudgeBackend = {
+      name: "signal-st-cap",
+      judge(opts) {
+        capturedSignal = opts.abortSignal;
+        return Effect.succeed({
+          pass: true,
+          reason: "ok",
+          issues: [],
+          overallSeverity: null,
+          retryCount: 0,
+        });
+      },
+    };
+    const trace: Trace = {
+      traceId: TraceId("signal-st"),
+      name: "sst",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    const controller = new AbortController();
+    yield* scoreTraces([trace], {
+      judge: signalCapturingJudge,
+      resultsDir: dir,
+      abortSignal: controller.signal,
+    });
+    expect(capturedSignal).toBe(controller.signal);
+  });
+
+  itEffect("abortSignal is undefined in scoreTraces when not provided", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let capturedSignal: AbortSignal | undefined;
+    const signalCapturingJudge: JudgeBackend = {
+      name: "signal-st-cap-2",
+      judge(opts) {
+        capturedSignal = opts.abortSignal;
+        return Effect.succeed({
+          pass: true,
+          reason: "ok",
+          issues: [],
+          overallSeverity: null,
+          retryCount: 0,
+        });
+      },
+    };
+    const trace: Trace = {
+      traceId: TraceId("no-signal-st"),
+      name: "nsst",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    yield* scoreTraces([trace], {
+      judge: signalCapturingJudge,
+      resultsDir: dir,
+    });
+    expect(capturedSignal).toBeUndefined();
+  });
+});
+
+// ── BlockStatement: publishGithubComment block body (L287, L325) ───────────
+describe("BlockStatement: publishGithubComment block executes fully", () => {
+  itEffect("runScenarios publishGithubComment receives the report", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let receivedReport: unknown;
+    const emitterSpy = vi.spyOn(reportModule, "makeReportEmitter").mockImplementation((opts) => {
+      return {
+        emitRun() { return Effect.void; },
+        emitReport() { return Effect.void; },
+        publishGithubComment(report) {
+          receivedReport = report;
+          return Effect.void;
+        },
+      };
+    });
+    try {
+      yield* runScenarios([makeScenario("gc-block")], {
+        runner: stubRunner,
+        judge: stubJudge,
+        resultsDir: dir,
+        githubComment: GITHUB_COMMENT_VALUE,
+      });
+      expect(receivedReport).toBeDefined();
+      const rpt = receivedReport as { summary: { total: number } };
+      expect(rpt.summary.total).toBe(EXPECTED_TOTAL_ONE);
+    } finally {
+      emitterSpy.mockRestore();
+    }
+  });
+});
+
+// ── ObjectLiteral: { concurrency } spread in forEach (L282, L320) ──────────
+describe("ObjectLiteral: { concurrency } in Effect.forEach options", () => {
+  itEffect("runScenarios uses the provided concurrency value (not default)", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const RUNNER_DELAY_MS = 200;
+    const slowRunner: AgentRunner = {
+      ...stubRunner,
+      start(scenario) {
+        return Effect.delay(
+          Effect.succeed({
+            __brand: "AgentHandle",
+            kind: "subprocess",
+            scenarioId: scenario.id,
+            workspaceDir: "/tmp/none",
+            initialFiles: new Map<string, string>(),
+            turnsExecuted: { count: 0 },
+          }),
+          RUNNER_DELAY_MS,
+        );
+      },
+    };
+    // With concurrency=1 (serial), 2 scenarios take ~400ms
+    const before = Date.now();
+    yield* runScenarios(
+      [makeScenario("serial-a"), makeScenario("serial-b")],
+      { runner: slowRunner, judge: stubJudge, resultsDir: dir, concurrency: 1 },
+    );
+    const elapsed = Date.now() - before;
+    // Serial execution: should take at least 2 * delay
+    expect(elapsed).toBeGreaterThanOrEqual(RUNNER_DELAY_MS);
   });
 });

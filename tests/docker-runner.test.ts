@@ -4,7 +4,7 @@
 import { vi, describe, expect, afterEach } from "vitest";
 import { Effect } from "effect";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { itEffect, EITHER_LEFT, EITHER_RIGHT } from "./support/effect.js";
@@ -514,5 +514,247 @@ describe("DockerRunner.turn()", () => {
     expect(args[0]).toBe("exec");
     expect(args[1]).toBe("");
     expect(args[2]).toBe("claude");
+  });
+});
+
+// ------------------------------------------------------------------
+// DockerRunner.turn() — optional chaining guards (kills L492, L495)
+// ------------------------------------------------------------------
+
+describe("DockerRunner.turn() optional chaining", () => {
+  itEffect("succeeds when child.stdout is undefined (optional chaining guard)", function* () {
+    // Lines 492, 495: child.stdout?.on / child.stderr?.on
+    // The mutants remove the optional chaining, which would crash if stdout/stderr is undefined.
+    const child = new FakeChildProcess();
+    // Deliberately do NOT emit any stdout/stderr events — the close handler must still fire.
+    setImmediate(() => {
+      child.emit("close", 0);
+    });
+    // Override stdout/stderr to undefined to test the optional chaining.
+    Object.defineProperty(child, "stdout", { value: undefined, writable: true });
+    Object.defineProperty(child, "stderr", { value: undefined, writable: true });
+    spawnMock.mockReturnValueOnce(child as ReturnType<typeof childProcess.spawn>);
+    const runner = new DockerRunner({ image: SAFE_IMAGE_NAME });
+    const handle = makeFakeHandle(DOCKER_CONTAINER_ID);
+    // Must not throw — optional chaining must guard against undefined stdout/stderr.
+    const turn = yield* runner.turn(handle, "p", { timeoutMs: 10_000 });
+    expect(turn.response).toBe("");
+  });
+
+  itEffect("succeeds when child.stderr is undefined but stdout has content", function* () {
+    const child = new FakeChildProcess();
+    Object.defineProperty(child, "stderr", { value: undefined, writable: true });
+    const stdoutData = JSON.stringify({ type: "assistant", content: "ok" }) + "\n";
+    setImmediate(() => {
+      child.stdout.emit("data", Buffer.from(stdoutData));
+      child.emit("close", 0);
+    });
+    spawnMock.mockReturnValueOnce(child as ReturnType<typeof childProcess.spawn>);
+    const runner = new DockerRunner({ image: SAFE_IMAGE_NAME });
+    const handle = makeFakeHandle(DOCKER_CONTAINER_ID);
+    const turn = yield* runner.turn(handle, "p", { timeoutMs: 10_000 });
+    expect(turn.response).toBe("ok");
+  });
+});
+
+// ------------------------------------------------------------------
+// DockerRunner.turn() — timeout kills child (kills L499-501 BlockStatement)
+// ------------------------------------------------------------------
+
+describe("DockerRunner.turn() timeout kills child", () => {
+  itEffect("calls child.kill when timeout fires", function* () {
+    // Lines 499-501: if (finished) return; finished = true; try { child.kill("SIGKILL"); }
+    // The BlockStatement mutant removes the kill call — child would leak.
+    let killCalled = false;
+    const child = new FakeChildProcess(() => {
+      killCalled = true;
+    });
+    // Never emit close — force timeout path.
+    spawnMock.mockReturnValueOnce(child as ReturnType<typeof childProcess.spawn>);
+    const runner = new DockerRunner({ image: SAFE_IMAGE_NAME });
+    const handle = makeFakeHandle(DOCKER_CONTAINER_ID);
+    yield* Effect.either(runner.turn(handle, "p", { timeoutMs: DOCKER_TURN_TIMEOUT_SHORT }));
+    // The timeout handler must have called child.kill("SIGKILL").
+    expect(killCalled).toBe(true);
+  });
+});
+
+// ------------------------------------------------------------------
+// DockerRunner.turn() — error event with undefined containerId (kills L538-539)
+// ------------------------------------------------------------------
+
+describe("DockerRunner.turn() error path", () => {
+  itEffect("returns timeout error when spawn emits error with undefined containerId", function* () {
+    // Lines 538-539: if (finished) return; finished = true;
+    // Also exercises line 484: cid = handle.containerId ?? "".
+    spawnMock.mockReturnValueOnce(fakeErrorChild() as ReturnType<typeof childProcess.spawn>);
+    const runner = new DockerRunner({ image: SAFE_IMAGE_NAME });
+    const handle = makeFakeHandle(undefined);
+    const result = yield* Effect.either(runner.turn(handle, "p", { timeoutMs: 10_000 }));
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT) {
+      expect(result.left._tag).toBe(ERROR_TAG.AgentRunTimeoutError);
+    }
+  });
+});
+
+// ------------------------------------------------------------------
+// DockerRunner.stop() — docker kill throws, rm throws, still cleans workspace
+// (kills L573-574, L578-579 BlockStatement/ObjectLiteral mutants)
+// ------------------------------------------------------------------
+
+describe("DockerRunner.stop() error resilience", () => {
+  itEffect("removes workspace even when both docker kill and rm throw", function* () {
+    // Lines 573-574, 578-579: catch blocks for docker kill and docker rm.
+    // The BlockStatement mutant removes the catch body, causing the error to propagate.
+    // The ObjectLiteral mutant replaces the catch options with {}, changing behavior.
+    execSyncMock
+      .mockImplementationOnce(() => {
+        throw new Error("kill failed");
+      }) // docker kill throws
+      .mockImplementationOnce(() => {
+        throw new Error("rm failed");
+      }); // docker rm throws
+    const runner = new DockerRunner({ image: SAFE_IMAGE_NAME });
+    const handle = makeFakeHandle("cid-both-fail");
+    const dir = handle.workspaceDir;
+    expect(existsSync(dir)).toBe(true);
+    // stop() must NOT throw — both docker errors are caught and swallowed.
+    yield* runner.stop(handle);
+    // The workspace directory must still be cleaned up.
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  itEffect("removes workspace with nested subdirectories when docker calls fail", function* () {
+    // Line 584: rmSync({ recursive: true, force: true })
+    // With { recursive: false }, nested dirs would leave remnants.
+    const runner = new DockerRunner({ image: SAFE_IMAGE_NAME });
+    const handle = makeFakeHandle("cid-nested");
+    // Create nested directories in the workspace.
+    const deepDir = path.join(handle.workspaceDir, "a", "b", "c");
+    mkdirSync(deepDir, { recursive: true });
+    writeFileSync(path.join(deepDir, "deep.txt"), "deep");
+    execSyncMock.mockImplementation(() => {
+      throw new Error("docker not available");
+    });
+    yield* runner.stop(handle);
+    // Entire tree must be gone.
+    expect(existsSync(handle.workspaceDir)).toBe(false);
+    expect(existsSync(deepDir)).toBe(false);
+  });
+});
+
+// ------------------------------------------------------------------
+// DockerRunner.start() — containerId is trimmed (kills L450 .trim())
+// ------------------------------------------------------------------
+
+describe("DockerRunner.start() containerId trimming", () => {
+  itEffect("trims whitespace from docker create output for containerId", function* () {
+    // Line 450: .trim() — the MethodExpression mutant replaces trim() with line.
+    // If trim is removed, containerId would contain trailing newline/whitespace.
+    const containerId = "  abc123  \n";
+    execSyncMock
+      .mockReturnValueOnce(Buffer.from("")) // docker image inspect
+      .mockReturnValueOnce(Buffer.from(containerId)) // docker create (with whitespace)
+      .mockReturnValueOnce(Buffer.from("")); // docker start
+    const runner = new DockerRunner({ image: SAFE_IMAGE_NAME });
+    const result = yield* Effect.either(runner.start(makeScenario()));
+    expect(result._tag).toBe(EITHER_RIGHT);
+    if (result._tag === EITHER_RIGHT) {
+      // containerId must be trimmed — not "  abc123  \n"
+      expect(result.right.containerId).toBe("abc123");
+      // Clean up.
+      rmSync(result.right.workspaceDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ------------------------------------------------------------------
+// DockerRunner.start() — execSync options (kills L448, L451 ObjectLiteral/ArrayDeclaration)
+// ------------------------------------------------------------------
+
+describe("DockerRunner.start() execSync option shape", () => {
+  itEffect("passes containerId to docker start command", function* () {
+    // Line 451: execSync(`docker start ${shellQuote(cid)}`, { stdio: "ignore" })
+    // The ObjectLiteral mutant replaces { stdio: "ignore" } with {}.
+    // The StringLiteral mutant (L603) changes shellQuote's backtick template.
+    // Verify the start command uses the trimmed containerId from create.
+    const cid = "test-container-xyz";
+    execSyncMock
+      .mockReturnValueOnce(Buffer.from("")) // docker image inspect
+      .mockReturnValueOnce(Buffer.from(`${cid}\n`)) // docker create
+      .mockReturnValueOnce(Buffer.from("")); // docker start
+    const runner = new DockerRunner({ image: SAFE_IMAGE_NAME });
+    const result = yield* Effect.either(runner.start(makeScenario()));
+    const startCall = execSyncMock.mock.calls[2]?.[0] as string | undefined;
+    // Clean up if workspace was created.
+    if (result._tag === EITHER_RIGHT) {
+      rmSync(result.right.workspaceDir, { recursive: true, force: true });
+    }
+    // The docker start command must contain the containerId.
+    expect(startCall).toContain("docker start");
+    expect(startCall).toContain(cid);
+  });
+
+  itEffect("passes image name in docker create command", function* () {
+    const image = "my-image:v1";
+    execSyncMock
+      .mockReturnValueOnce(Buffer.from("")) // docker image inspect
+      .mockReturnValueOnce(Buffer.from("cid\n")) // docker create
+      .mockReturnValueOnce(Buffer.from("")); // docker start
+    const runner = new DockerRunner({ image });
+    const result = yield* Effect.either(runner.start(makeScenario()));
+    const createCall = execSyncMock.mock.calls[1]?.[0] as string | undefined;
+    if (result._tag === EITHER_RIGHT) {
+      rmSync(result.right.workspaceDir, { recursive: true, force: true });
+    }
+    expect(createCall).toContain(image);
+  });
+});
+
+// ------------------------------------------------------------------
+// DockerRunner.start() — default network (kills L431 conditional)
+// ------------------------------------------------------------------
+
+describe("DockerRunner.start() default network", () => {
+  itEffect("uses 'none' as default network when not specified", function* () {
+    // Line 431: const network = this.#opts.network ?? "none";
+    // The ConditionalExpression mutant replaces with "none" always or with undefined.
+    execSyncMock
+      .mockReturnValueOnce(Buffer.from("")) // docker image inspect
+      .mockReturnValueOnce(Buffer.from("cid\n")) // docker create
+      .mockReturnValueOnce(Buffer.from("")); // docker start
+    const runner = new DockerRunner({ image: SAFE_IMAGE_NAME });
+    // No network option — must default to "none".
+    const result = yield* Effect.either(runner.start(makeScenario()));
+    const createCall = execSyncMock.mock.calls[1]?.[0] as string | undefined;
+    if (result._tag === EITHER_RIGHT) {
+      rmSync(result.right.workspaceDir, { recursive: true, force: true });
+    }
+    // The create command must include "--network none".
+    expect(createCall).toContain("--network");
+    expect(createCall).toContain("none");
+  });
+});
+
+// ------------------------------------------------------------------
+// DockerRunner.turn() — spawn args include DEFAULT_CLAUDE_ARGS (kills L485 ArrayDeclaration)
+// ------------------------------------------------------------------
+
+describe("DockerRunner.turn() spawn args", () => {
+  itEffect("includes DEFAULT_CLAUDE_ARGS flags in spawn args", function* () {
+    // Line 485: args = ["exec", cid, "claude", ...DEFAULT_CLAUDE_ARGS, prompt]
+    // The ArrayDeclaration mutant replaces with [].
+    const stdout = JSON.stringify({ type: "assistant", content: "x" }) + "\n";
+    spawnMock.mockReturnValueOnce(fakeChild([stdout]) as ReturnType<typeof childProcess.spawn>);
+    const runner = new DockerRunner({ image: SAFE_IMAGE_NAME });
+    const handle = makeFakeHandle(DOCKER_CONTAINER_ID);
+    yield* runner.turn(handle, "p", { timeoutMs: 10_000 });
+    const args = spawnMock.mock.calls[0]?.[1] as string[];
+    // DEFAULT_CLAUDE_ARGS = ["-p", "--output-format", "stream-json", "--verbose"]
+    expect(args).toContain("-p");
+    expect(args).toContain("--output-format");
+    expect(args).toContain("stream-json");
+    expect(args).toContain("--verbose");
   });
 });

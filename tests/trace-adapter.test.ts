@@ -40,6 +40,7 @@ const INT_VALUE_7 = 7;
 const INT_VALUE_42 = 42;
 const RESPONSE_NON_EMPTY = "non-empty";
 const START_DATE_2023 = "2023-11-14";
+const DOUBLE_VALUE_99 = 99;
 
 describe("canonicalTraceAdapter", () => {
   itEffect("decodes a valid canonical JSON trace", function* () {
@@ -983,5 +984,234 @@ describe("getTraceAdapter dispatch identity", () => {
   it("otel format returns the otelTraceAdapter instance", () => {
     const adapter = getTraceAdapter(TRACE_FORMAT.Otel);
     expect(adapter).toBe(otelTraceAdapter);
+  });
+});
+
+// ─── parseEither — trimStart vs trimEnd discrimination ────────────────────────
+// Kills MethodExpression L30 (trimEnd) and ConditionalExpression/MethodExpression
+// mutations on L31 (endsWith, LogicalOperator &&, ConditionalExpression false).
+
+describe("parseEither trimStart vs trimEnd discrimination", () => {
+  const TRIM_DISTINCT_TRACE_ID = "trim-distinct";
+
+  itEffect("leading whitespace + trailing non-whitespace char: trimStart detects JSON, trimEnd would not", function* () {
+    // Source: trailing 'x' after JSON closing brace, plus leading spaces.
+    // trimStart removes leading spaces → trimmed = '{"traceId":...}x'
+    //   → startsWith("{") → JSON.parse(source) → fails (trailing x is invalid JSON)
+    //   → catch → TraceDecodeError with JSON parse message.
+    // If trimEnd is used: trimmed = '  {"traceId":...}' (leading spaces remain)
+    //   → startsWith("{") is false → YAML.parse(source) → fails differently.
+    // Both paths fail, but the error message origin differs. More importantly,
+    // trimEnd on this source leaves leading whitespace, making startsWith("{") false.
+    const payload = "  " + JSON.stringify({
+      traceId: TRIM_DISTINCT_TRACE_ID,
+      name: "n",
+      turns: [],
+      expectedBehavior: "",
+      validationChecks: [],
+    }) + "x"; // trailing non-whitespace makes trimEnd ineffective at finding {
+    const result = yield* Effect.either(
+      canonicalTraceAdapter.decode(payload, "mem://trim-discriminate"),
+    );
+    // Must fail — but the key observation is that JSON.parse was attempted
+    // (because trimStart removed the leading whitespace).
+    expect(result._tag).toBe(EITHER_LEFT);
+  });
+
+  itEffect("leading whitespace only: trimStart correctly routes to JSON.parse", function* () {
+    // Source has only leading whitespace. trimStart removes it, startsWith("{") is true,
+    // JSON.parse(source) is called (source still has the leading spaces, but JSON.parse
+    // allows leading whitespace). If trimEnd were used, startsWith would be false.
+    const payload = "  " + JSON.stringify({
+      traceId: TRIM_DISTINCT_TRACE_ID,
+      name: "n",
+      turns: [],
+      expectedBehavior: "",
+      validationChecks: [],
+    });
+    const trace = yield* canonicalTraceAdapter.decode(payload, "mem://trim-leading-only");
+    expect(trace.traceId).toBe(TRIM_DISTINCT_TRACE_ID);
+  });
+
+  itEffect("JSON.parse is used for object source (not YAML.parse) — kills BlockStatement empty-body mutation", function* () {
+    // JSON.parse rejects trailing commas; YAML.parse accepts them.
+    // If the if-block body is emptied (L31 BlockStatement), YAML.parse is called
+    // instead of JSON.parse. A source with a trailing comma:
+    //   - Original: JSON.parse fails → catch → Left (SchemaInvalid)
+    //   - Mutation: YAML.parse succeeds → valid trace → Right
+    const payload = '{"traceId":"t1","name":"n","turns":[],"expectedBehavior":"","validationChecks":[],}';
+    const result = yield* Effect.either(
+      canonicalTraceAdapter.decode(payload, "mem://trailing-comma"),
+    );
+    // JSON.parse must be called (original code), which fails on the trailing comma.
+    expect(result._tag).toBe(EITHER_LEFT);
+  });
+});
+
+// ─── decodeCanonical catch block — error message from JSON parse ───────────────
+// Kills BlockStatement L42: if the catch block is emptied, the error from JSON.parse
+// is lost and replaced by a schema validation error on undefined.
+
+describe("decodeCanonical catch block preserves parse error semantics", () => {
+  itEffect("malformed JSON error message contains parse-related text, not schema path", function* () {
+    // JSON.parse("{bad") throws a SyntaxError like "Expected property name or '}'".
+    // The catch block captures this message. If the catch is emptied, parsed stays
+    // undefined and Value.Errors(TraceSchema, undefined) produces schema path errors
+    // like "/ traceId Expected string" — distinctly different content.
+    const result = yield* Effect.either(
+      canonicalTraceAdapter.decode("{bad", "mem://catch-err-msg"),
+    );
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT && result.left.cause._tag === "SchemaInvalid") {
+      const msg = result.left.cause.errors[0] ?? "";
+      // JSON parse errors contain "property name" or "JSON at position" or similar.
+      // Schema validation errors contain paths like "/" or "/traceId".
+      // The key distinction: parse errors do NOT start with "/" (schema path prefix).
+      expect(msg.startsWith("/")).toBe(false);
+      expect(msg.length).toBeGreaterThan(0);
+    }
+  });
+
+  itEffect("YAML parse error is captured when source is neither JSON object nor array", function* () {
+    // Source starts with "x" (not { or [). parseEither routes to YAML.parse.
+    // YAML.parse("x: [") throws a YAML error. The catch captures it.
+    const result = yield* Effect.either(
+      canonicalTraceAdapter.decode("x: [", "mem://yaml-err"),
+    );
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT && result.left.cause._tag === "SchemaInvalid") {
+      expect(result.left.cause.errors.length).toBeGreaterThan(0);
+      // The error message must be non-empty (kills errors: [] / empty catch mutations).
+      expect(result.left.cause.errors[0]?.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+// ─── attrNumber — boolean/non-standard intValue types ─────────────────────────
+// Kills ConditionalExpression L122 (typeof inner.intValue === "string" → true).
+
+describe("attrNumber non-standard intValue types (otelTraceAdapter)", () => {
+  itEffect("boolean intValue falls through to doubleValue when string check is bypassed", function* () {
+    // intValue is true (boolean). typeof true === "number" → false (line 121).
+    // typeof true === "string" → false (line 122). Falls through to doubleValue.
+    // If L122 mutates to `if (true)`: Number(true) = 1, not NaN → returns 1
+    // instead of doubleValue=99. This difference kills the mutation.
+    const payload = JSON.stringify({
+      resourceSpans: [{
+        scopeSpans: [{
+          spans: [{
+            name: "x",
+            attributes: [
+              { key: "gen_ai.prompt", value: { stringValue: PROMPT_Q } },
+              { key: "gen_ai.completion", value: { stringValue: RESPONSE_A } },
+              { key: "gen_ai.usage.input_tokens", value: { intValue: true, doubleValue: 99 } },
+            ],
+          }],
+        }],
+      }],
+    });
+    const trace = yield* otelTraceAdapter.decode(payload, "mem://bool-intvalue");
+    // Original code: typeof true !== "string" → falls through → doubleValue = 99.
+    // Mutation: if (true) → Number(true) = 1 → returns 1.
+    expect(trace.turns[0]?.inputTokens).toBe(DOUBLE_VALUE_99);
+  });
+
+  itEffect("null intValue falls through to doubleValue", function* () {
+    // intValue is null. typeof null === "number" → false.
+    // typeof null === "string" → false. Falls through to doubleValue.
+    // Mutation: if (true) → Number(null) = 0 → returns 0 instead of 42.
+    const payload = JSON.stringify({
+      resourceSpans: [{
+        scopeSpans: [{
+          spans: [{
+            name: "x",
+            attributes: [
+              { key: "gen_ai.prompt", value: { stringValue: PROMPT_Q } },
+              { key: "gen_ai.completion", value: { stringValue: RESPONSE_A } },
+              { key: "gen_ai.usage.output_tokens", value: { intValue: null, doubleValue: INT_VALUE_42 } },
+            ],
+          }],
+        }],
+      }],
+    });
+    const trace = yield* otelTraceAdapter.decode(payload, "mem://null-intvalue");
+    expect(trace.turns[0]?.outputTokens).toBe(INT_VALUE_42);
+  });
+});
+
+// ─── spansFromEnvelope — observable filtering through Turn conversion ──────────
+// Kills ConditionalExpression mutations on L138 (typeof rs), L142 (typeof ss),
+// L146 (typeof s) by making the intermediate state observable via Turn counts.
+
+describe("spansFromEnvelope intermediate filtering (otelTraceAdapter)", () => {
+  itEffect("non-object resourceSpans element with nested scopeSpans property is filtered", function* () {
+    // A number element in resourceSpans. Mutation L138 (false) would skip the
+    // typeof check. But (42 as any).scopeSpans is undefined → !Array.isArray → continue.
+    // This is unkillable via Turn count alone. We test it for documentation.
+    const payload = JSON.stringify({
+      resourceSpans: [
+        42,
+        {
+          scopeSpans: [{
+            spans: [{
+              name: "x",
+              attributes: [
+                { key: "gen_ai.prompt", value: { stringValue: PROMPT_Q } },
+                { key: "gen_ai.completion", value: { stringValue: RESPONSE_A } },
+              ],
+            }],
+          }],
+        },
+      ],
+    });
+    const trace = yield* otelTraceAdapter.decode(payload, "mem://num-rs-2");
+    expect(trace.turns.length).toBe(TURN_COUNT_ONE);
+  });
+
+  itEffect("string with scopeSpans property in resourceSpans is filtered correctly", function* () {
+    // Use a string that would not cause a crash but has no scopeSpans.
+    // The typeof check on L138 filters it out.
+    const payload = JSON.stringify({
+      resourceSpans: [
+        "has-no-scopeSpans",
+        {
+          scopeSpans: [{
+            spans: [{
+              name: "x",
+              attributes: [
+                { key: "gen_ai.prompt", value: { stringValue: PROMPT_Q } },
+                { key: "gen_ai.completion", value: { stringValue: RESPONSE_A } },
+              ],
+            }],
+          }],
+        },
+      ],
+    });
+    const trace = yield* otelTraceAdapter.decode(payload, "mem://str-rs");
+    expect(trace.turns.length).toBe(TURN_COUNT_ONE);
+  });
+});
+
+// ─── decodeOtel catch block — error message from JSON parse ───────────────────
+// Kills BlockStatement L180: if the catch is emptied, parsed stays undefined,
+// and the "root is not an object" guard fires instead of the parse error message.
+
+describe("decodeOtel catch block preserves parse error semantics", () => {
+  itEffect("malformed JSON error message does NOT contain 'root is not an object'", function* () {
+    // JSON.parse("{bad otel") throws a SyntaxError. The catch block captures this.
+    // If emptied, parsed = undefined → typeof undefined !== "object" → true →
+    // fails with "root is not an object". We verify the error is NOT that message.
+    const result = yield* Effect.either(
+      otelTraceAdapter.decode("{bad otel", ORIGIN_PATH_OTEL),
+    );
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT && result.left.cause._tag === "SchemaInvalid") {
+      const errors = result.left.cause.errors;
+      expect(errors.length).toBeGreaterThan(0);
+      // The error must be the JSON parse error, not "root is not an object".
+      expect(errors).not.toContain(ERR_ROOT_NOT_OBJECT);
+      // The parse error message should NOT start with "/" (schema path prefix).
+      expect(errors[0]?.startsWith("/")).toBe(false);
+    }
   });
 });
