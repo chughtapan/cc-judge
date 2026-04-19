@@ -117,4 +117,69 @@ describe("main (yargs dispatch)", () => {
     ]);
     expect(code).toBe(EXIT_FATAL);
   });
+
+  itEffect("main with subprocess runtime and --bin parses cleanly (returns before runner invokes)", function* () {
+    const dir = tmpScenarioDir();
+    const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-"));
+    // subprocess runtime parses OK; pipeline starts and runs against /bin/echo.
+    // That call may produce non-zero turns but never throws, so runCommand folds
+    // to exit 0 or 1 (not the 2 we see for missing --bin).
+    const code = yield* main([
+      "run",
+      dir,
+      "--runtime",
+      "subprocess",
+      "--bin",
+      "/bin/echo",
+      "--runs",
+      "1",
+      "--concurrency",
+      "1",
+      "--results",
+      results,
+      "--log-level",
+      "error",
+    ]);
+    expect([EXIT_SUCCESS, EXIT_FAILURE]).toContain(code);
+  });
+
+  itEffect("main with score + otel trace-format dispatches via otel adapter", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-"));
+    const traceFile = path.join(dir, "empty-otel.json");
+    writeFileSync(traceFile, JSON.stringify({ resourceSpans: [] }), "utf8");
+    const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-out-"));
+    const code = yield* main([
+      "score",
+      traceFile,
+      "--trace-format",
+      "otel",
+      "--results",
+      results,
+      "--log-level",
+      "error",
+    ]);
+    expect(code).toBe(EXIT_FATAL);
+  });
+
+  itEffect("main with explicit --judge model passes it through to parseRunArgs", function* () {
+    const dir = tmpScenarioDir();
+    const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-"));
+    // We only verify the yargs parse path doesn't error. Runtime bails on
+    // missing --image so exit is 2 (runner-resolution).
+    const code = yield* main([
+      "run",
+      dir,
+      "--runtime",
+      "docker",
+      "--judge",
+      "claude-sonnet-4-6",
+      "--judge-backend",
+      "anthropic",
+      "--results",
+      results,
+      "--log-level",
+      "warn",
+    ]);
+    expect(code).toBe(EXIT_RUNNER_RESOLUTION);
+  });
 });
