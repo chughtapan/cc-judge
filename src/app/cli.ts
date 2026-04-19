@@ -2,16 +2,18 @@
 // Built on yargs. Exit codes: 0 all-pass, 1 any-fail, 2 fatal.
 
 import { Effect } from "effect";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import * as path from "node:path";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { scenarioLoader } from "../core/scenario.js";
 import type { Scenario } from "../core/schema.js";
 import type { Trace } from "../core/schema.js";
-import { AnthropicJudgeBackend } from "../judge/index.js";
+import { AnthropicJudgeBackend, JUDGE_SYSTEM_PROMPT } from "../judge/index.js";
 import { DockerRunner, SubprocessRunner, type AgentRunner } from "../runner/index.js";
 import { BraintrustEmitter, PromptfooEmitter, type ObservabilityEmitter } from "../emit/observability.js";
 import { getTraceAdapter, type TraceFormat } from "../emit/trace-adapter.js";
+import { glob as doGlob } from "glob";
 import { RunnerResolutionError } from "../core/errors.js";
 import { runScenarios, scoreTraces } from "./pipeline.js";
 
@@ -41,6 +43,7 @@ export interface ScoreCliArgs {
   readonly traceFormat: "canonical" | "otel";
   readonly judge: string;
   readonly judgeBackend: string;
+  readonly judgeRubric?: string;
   readonly results: string;
   readonly githubComment?: number;
   readonly githubCommentArtifactUrl?: string;
@@ -154,7 +157,13 @@ export function scoreCommand(args: ScoreCliArgs): Effect.Effect<CliExitCode, nev
       traces.push(decoded.right);
     }
     if (traces.length === 0) return 2 as CliExitCode;
-    const judge = new AnthropicJudgeBackend({ model: args.judge });
+    const rubric = args.judgeRubric !== undefined
+      ? readFileSync(args.judgeRubric, "utf8")
+      : undefined;
+    const judge = new AnthropicJudgeBackend({
+      model: args.judge,
+      ...(rubric !== undefined ? { systemPrompt: `${JUDGE_SYSTEM_PROMPT}\n\n${rubric}` } : {}),
+    });
     const emitters = buildObservability(args.emitBraintrust, args.emitPromptfoo);
     const report = yield* scoreTraces(traces, {
       judge,
@@ -177,10 +186,16 @@ export function scoreCommand(args: ScoreCliArgs): Effect.Effect<CliExitCode, nev
 }
 
 function resolveTraceFiles(pathOrGlob: string): ReadonlyArray<string> {
-  // Scenario loader already handles glob + file + directory resolution;
-  // reuse its underlying glob library by going via node:fs for a single
-  // file — traces are JSON not TS, so we don't import them.
-  // For v1 we accept a single file path. Expansion deferred.
+  const isDir = (() => { try { return statSync(pathOrGlob).isDirectory(); } catch { return false; } })();
+  if (isDir) {
+    return readdirSync(pathOrGlob)
+      .filter((f) => f.endsWith(".json") || f.endsWith(".yaml") || f.endsWith(".yml"))
+      .map((f) => path.join(pathOrGlob, f))
+      .sort();
+  }
+  if (/[*?\[\]{}]/.test(pathOrGlob)) {
+    return doGlob.sync(pathOrGlob);
+  }
   return [pathOrGlob];
 }
 
@@ -235,6 +250,7 @@ export function parseScoreArgs(raw: unknown): ScoreCliArgs {
     traceFormat: traceFormat as TraceFormat,
     judge: typeof r["judge"] === "string" ? r["judge"] : "claude-opus-4-7",
     judgeBackend: typeof r["judgeBackend"] === "string" ? r["judgeBackend"] : "anthropic",
+    ...(typeof r["judgeRubric"] === "string" ? { judgeRubric: r["judgeRubric"] } : {}),
     results: typeof r["results"] === "string" ? r["results"] : "./eval-results",
     ...(typeof r["githubComment"] === "number" ? { githubComment: r["githubComment"] } : {}),
     ...(typeof r["githubCommentArtifactUrl"] === "string"
@@ -277,6 +293,7 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
           .option("trace-format", { choices: ["canonical", "otel"] as const, default: "canonical" })
           .option("judge", { type: "string", default: "claude-opus-4-7" })
           .option("judge-backend", { type: "string", default: "anthropic" })
+          .option("judge-rubric", { type: "string", describe: "Path to a rubric file appended to the judge system prompt" })
           .option("results", { type: "string", default: "./eval-results" })
           .option("github-comment", { type: "number" })
           .option("github-comment-artifact-url", { type: "string" })
