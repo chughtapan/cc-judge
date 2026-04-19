@@ -6,9 +6,8 @@ import {
   getTraceAdapter,
   TRACE_FORMAT,
 } from "../src/emit/trace-adapter.js";
-import { itEffect } from "./support/effect.js";
+import { itEffect, EITHER_LEFT } from "./support/effect.js";
 
-const EITHER_LEFT = "Left" as const;
 const TRACE_ID_1 = "trace-1";
 const PROMPT_HI = "hi";
 const RESPONSE_HELLO = "hello";

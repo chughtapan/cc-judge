@@ -63,18 +63,13 @@ export type RunnerResolutionCause =
   | { readonly _tag: "NoRunnerConfigured" }
   | { readonly _tag: "InvalidRuntime"; readonly value: string };
 
-// ── Tag constants ──────────────────────────────────────────────────────────
-// Re-export the `_tag` literal values so callers discriminate via a single
-// source of truth (including tests). Principle 1: one name for one string.
+// Tag constants. Identity-mapped objects over the `_tag` union members;
+// the mapped-type `satisfies` forces value == key at the type level, so a
+// silent rename of a cause variant breaks compilation here.
 
 export const ERROR_TAG = {
-  LoadError: "LoadError",
   AgentStartError: "AgentStartError",
   AgentRunTimeoutError: "AgentRunTimeoutError",
-  TotalTimeoutExceeded: "TotalTimeoutExceeded",
-  TraceDecodeError: "TraceDecodeError",
-  PublishError: "PublishError",
-  RunnerResolutionError: "RunnerResolutionError",
 } as const;
 
 export const LOAD_ERROR_CAUSE = {
@@ -83,7 +78,7 @@ export const LOAD_ERROR_CAUSE = {
   ParseFailure: "ParseFailure",
   SchemaInvalid: "SchemaInvalid",
   DuplicateId: "DuplicateId",
-} as const satisfies Record<LoadErrorCause["_tag"], LoadErrorCause["_tag"]>;
+} as const satisfies { readonly [K in LoadErrorCause["_tag"]]: K };
 
 export const AGENT_START_CAUSE = {
   ImageMissing: "ImageMissing",
@@ -91,20 +86,4 @@ export const AGENT_START_CAUSE = {
   BinaryNotFound: "BinaryNotFound",
   WorkspacePathEscape: "WorkspacePathEscape",
   WorkspaceSetupFailed: "WorkspaceSetupFailed",
-} as const satisfies Record<AgentStartErrorCause["_tag"], AgentStartErrorCause["_tag"]>;
-
-export const TRACE_DECODE_CAUSE = {
-  UnknownFormat: "UnknownFormat",
-  SchemaInvalid: "SchemaInvalid",
-} as const satisfies Record<TraceDecodeCause["_tag"], TraceDecodeCause["_tag"]>;
-
-export const PUBLISH_ERROR_CAUSE = {
-  GhCliMissing: "GhCliMissing",
-  GhCliFailed: "GhCliFailed",
-  BodyTooLarge: "BodyTooLarge",
-} as const satisfies Record<PublishErrorCause["_tag"], PublishErrorCause["_tag"]>;
-
-export const RUNNER_RESOLUTION_CAUSE = {
-  NoRunnerConfigured: "NoRunnerConfigured",
-  InvalidRuntime: "InvalidRuntime",
-} as const satisfies Record<RunnerResolutionCause["_tag"], RunnerResolutionCause["_tag"]>;
+} as const satisfies { readonly [K in AgentStartErrorCause["_tag"]]: K };

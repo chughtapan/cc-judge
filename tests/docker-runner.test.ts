@@ -6,11 +6,10 @@ import { Effect } from "effect";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { itEffect } from "./support/effect.js";
+import { itEffect, EITHER_LEFT, EITHER_RIGHT } from "./support/effect.js";
 
-// createRequire keeps the vi.mock factory synchronous; an async factory would
-// trip agent-code-guard/async-keyword, and a .then() chain would trip
-// agent-code-guard/then-chain. Both are forbidden in tests.
+// createRequire keeps the vi.mock factory synchronous so the mocked module is
+// ready before the dynamic imports below pull in the code under test.
 const { childProcessActual } = vi.hoisted(() => {
   const { createRequire } = require("node:module") as typeof import("node:module");
   const req = createRequire(import.meta.url);
@@ -28,8 +27,6 @@ import * as childProcess from "node:child_process";
 
 const execSyncMock = vi.mocked(childProcess.execSync);
 
-const EITHER_LEFT = "Left";
-const EITHER_RIGHT = "Right";
 const NONEXISTENT_IMAGE = "nonexistent:latest";
 const HAPPY_CONTAINER_ID = "container-abc-123";
 

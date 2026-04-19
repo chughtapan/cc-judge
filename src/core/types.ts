@@ -25,30 +25,23 @@ export const ISSUE_SEVERITY = {
   Minor: "minor",
   Significant: "significant",
   Critical: "critical",
-} as const satisfies Record<string, IssueSeverity>;
+} as const satisfies { readonly [K in Capitalize<IssueSeverity>]: Uncapitalize<K> };
 
 export type RunSource = "scenario" | "trace";
 
 export const RUN_SOURCE = {
   Scenario: "scenario",
   Trace: "trace",
-} as const satisfies Record<string, RunSource>;
+} as const satisfies { readonly [K in Capitalize<RunSource>]: Uncapitalize<K> };
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
-
-export const LOG_LEVEL = {
-  Debug: "debug",
-  Info: "info",
-  Warn: "warn",
-  Error: "error",
-} as const satisfies Record<string, LogLevel>;
 
 export type RuntimeKind = "docker" | "subprocess";
 
 export const RUNTIME_KIND = {
   Docker: "docker",
   Subprocess: "subprocess",
-} as const satisfies Record<string, RuntimeKind>;
+} as const satisfies { readonly [K in Capitalize<RuntimeKind>]: Uncapitalize<K> };
 
 export interface Issue {
   readonly issue: string;

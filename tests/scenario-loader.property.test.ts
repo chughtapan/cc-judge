@@ -10,9 +10,8 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { scenarioLoader } from "../src/core/scenario.js";
 import { LOAD_ERROR_CAUSE } from "../src/core/errors.js";
+import { EITHER_LEFT, EITHER_RIGHT } from "./support/effect.js";
 
-const EITHER_LEFT = "Left" as const;
-const EITHER_RIGHT = "Right" as const;
 const PROP_ROUNDTRIP_RUNS = 50;
 const PROP_PATH_RUNS = 200;
 const PROP_DUP_RUNS = 20;

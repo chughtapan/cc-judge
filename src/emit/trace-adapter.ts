@@ -15,7 +15,7 @@ export type TraceFormat = "canonical" | "otel";
 export const TRACE_FORMAT = {
   Canonical: "canonical",
   Otel: "otel",
-} as const satisfies Record<string, TraceFormat>;
+} as const satisfies { readonly [K in Capitalize<TraceFormat>]: Uncapitalize<K> };
 
 export interface TraceAdapter {
   readonly format: TraceFormat;

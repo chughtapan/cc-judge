@@ -8,11 +8,7 @@ import { SubprocessRunner } from "../src/runner/index.js";
 import { ScenarioId, RUNTIME_KIND } from "../src/core/types.js";
 import { ERROR_TAG, AGENT_START_CAUSE } from "../src/core/errors.js";
 import type { Scenario } from "../src/core/schema.js";
-import { itEffect } from "./support/effect.js";
-
-// ── Either tag literals (no upstream export; co-locate here) ──────────────
-const EITHER_LEFT = "Left" as const;
-const EITHER_RIGHT = "Right" as const;
+import { itEffect, EITHER_LEFT, EITHER_RIGHT } from "./support/effect.js";
 
 // ── Test fixture constants (consolidated; referenced across cases) ────────
 const NONEXISTENT_BIN = "/tmp/cc-judge-nonexistent-binary-xyz";
@@ -30,7 +26,6 @@ const FLAG_STREAM_JSON = "stream-json";
 const FLAG_CUSTOM = "--custom";
 const PROMPT_X = "PROMPT-X";
 const PROMPT_MY = "MYPROMPT";
-const TYPE_STRING = "string";
 
 const TIMEOUT_SHORT_MS = 50;
 const TURN_INDEX_ZERO = 0;
@@ -186,7 +181,7 @@ describe("SubprocessRunner.turn() Turn shape", () => {
     yield* runner.stop(handle);
     expect(turn.index).toBe(TURN_INDEX_ZERO);
     expect(turn.prompt).toBe(prompt);
-    expect(typeof turn.startedAt).toBe(TYPE_STRING);
+    expect(turn.startedAt).toEqual(expect.any(String));
     expect(turn.latencyMs).toBeGreaterThanOrEqual(0);
   });
 

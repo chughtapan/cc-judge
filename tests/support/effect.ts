@@ -1,7 +1,3 @@
-// itEffect — wrap a vitest `it` around an Effect.gen body.
-// The body is a generator yielding Effect values; runs via Effect.runPromise.
-// Satisfies agent-code-guard/async-keyword by keeping all test bodies Effect-first.
-
 import { Effect } from "effect";
 import type { YieldWrap } from "effect/Utils";
 import { it } from "vitest";
@@ -13,9 +9,10 @@ type EffectBody<A> = () => Generator<
 >;
 
 export function itEffect<A>(name: string, body: EffectBody<A>, timeout?: number): void {
-  if (timeout === undefined) {
-    it(name, () => Effect.runPromise(Effect.gen(body)));
-  } else {
-    it(name, () => Effect.runPromise(Effect.gen(body)), timeout);
-  }
+  it(name, () => Effect.runPromise(Effect.gen(body)), timeout);
 }
+
+// `_tag` values of Effect's Either discriminant. Shared across test files that
+// assert on runPromise + Effect.either results.
+export const EITHER_LEFT = "Left" as const;
+export const EITHER_RIGHT = "Right" as const;

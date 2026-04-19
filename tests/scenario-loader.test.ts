@@ -4,9 +4,8 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { scenarioLoader } from "../src/core/scenario.js";
-import { itEffect } from "./support/effect.js";
+import { itEffect, EITHER_LEFT } from "./support/effect.js";
 
-const EITHER_LEFT = "Left" as const;
 const SCENARIO_ID_HELLO_WORLD = "hello-world";
 const VALIDATION_CHECK_SAYS_HELLO = "says hello";
 const SCENARIO_IDS_AB = ["scen-a", "scen-b"] as const;
