@@ -2,6 +2,28 @@
 
 TypeScript-first CLI + SDK that runs Claude Code agents in isolated workspaces (or scores already-executed traces), judges transcripts and workspace diffs with an LLM, and emits a `summary.md` + `results.jsonl` + `details/*.yaml` report triple. Telemetry fans out to Braintrust and Promptfoo via a pluggable `ObservabilityEmitter` adapter.
 
+## Prerequisites
+
+### pnpm
+
+cc-judge requires `pnpm` ≥9.0. Install via npm or Corepack:
+
+```bash
+npm install -g pnpm
+# or enable Corepack (Node.js 16.9+)
+corepack enable
+```
+
+### ANTHROPIC_API_KEY
+
+The SDK's `AnthropicJudgeBackend` requires the `ANTHROPIC_API_KEY` environment variable:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+This key is used only for judge-backend API calls (Claude model invocations). It is not stored or rotated by cc-judge; manage rotation via your credential provider. The key scope is limited to LLM inference; it cannot modify your Anthropic org or billing.
+
 ## Install
 
 ```bash
@@ -15,13 +37,81 @@ cc-judge run   <scenario-path-or-glob> [options]
 cc-judge score <traces-path-or-glob>   [options]
 ```
 
-Exit codes: `0` all-pass, `1` any-fail, `2` fatal.
+### CLI Flags
+
+#### `run` command
+
+- `--runner` — Runner backend: `docker` (default) or `subprocess`. See [Runner backends](#runner-backends).
+- `--judge` — Judge backend: `anthropic` (default). See [Judging](#judging).
+- `--results-dir` — Directory for report output. Default: `./cc-judge-results`.
+- `--verbose` — Enable debug logging.
+
+#### `score` command
+
+- `--judge` — Judge backend: `anthropic` (default).
+- `--results-dir` — Directory for report output. Default: `./cc-judge-results`.
+- `--verbose` — Enable debug logging.
+
+### Exit codes
+
+- `0` — all scenarios passed
+- `1` — one or more scenarios failed (judgment failed or agent error)
+- `2` — fatal error (invalid config, missing prerequisites like Docker daemon, schema violation)
+
+Exit code `2` indicates an unrecoverable error (e.g., `DockerRunner` cannot reach the daemon, scenario file is malformed, or `ANTHROPIC_API_KEY` is absent). Exit code `1` indicates that one or more test scenarios ran but the judge marked them as failing.
+
+## Scenarios
+
+A **scenario** defines a workspace state and agent prompt; cc-judge runs the agent and judges the output.
+
+### Scenario schema
+
+```ts
+interface Scenario {
+  name: string;           // Human-readable test name
+  description: string;    // What the scenario tests
+  workspace: {
+    files: Record<string, string>;  // File path → content
+  };
+  prompt: string;         // Instruction for the Claude Code agent
+}
+```
+
+### Example scenario
+
+```yaml
+name: "Add TypeScript interface"
+description: "Agent adds a TypeScript interface to a source file"
+workspace:
+  files:
+    src/types.ts: |
+      // User types live here
+      export type User = { id: string; name: string };
+prompt: |
+  The file src/types.ts defines a User type. Add an interface `UserProfile` that extends User with email and roles fields. Write the interface, add JSDoc comments, and validate TypeScript.
+```
+
+Use YAML or JSON files. Place scenarios in a directory (e.g., `./scenarios/`) and pass the path or glob to `cc-judge run`:
+
+```bash
+cc-judge run ./scenarios/**/*.yaml
+```
 
 ## SDK
 
 ```ts
 import { runScenarios, DockerRunner, AnthropicJudgeBackend } from "cc-judge";
 import { Effect } from "effect";
+
+const scenarios = [
+  {
+    name: "Test 1",
+    description: "...",
+    workspace: { files: { "src/index.ts": "..." } },
+    prompt: "...",
+  },
+  // ... more scenarios
+];
 
 const report = await Effect.runPromise(
   runScenarios(scenarios, {
@@ -30,7 +120,50 @@ const report = await Effect.runPromise(
     resultsDir: "./eval-results",
   }),
 );
+
+console.log(report);
 ```
+
+## Runner backends
+
+### DockerRunner
+
+Runs each agent in an isolated container using the provided image.
+
+**Prerequisites:**
+- Docker daemon must be running and reachable at `/var/run/docker.sock` (Linux) or `//var/run/docker.sock` (WSL2).
+- Image must be pulled: `docker pull ghcr.io/anthropics/claude-code:latest`
+- Credentials for `ghcr.io`: Public image; no authentication required.
+- Fallback behavior: If the Docker daemon is unreachable, cc-judge fails with exit code `2` (fatal). This is intentional—Docker is a hard requirement for isolation. Check daemon status: `docker ps`.
+
+### SubprocessRunner
+
+Runs each agent as a subprocess on the local machine (less isolation; useful for CI or testing).
+
+## Judging
+
+cc-judge judges agent output by comparing the workspace state before and after execution. The judge backend encodes success/failure criteria as a prompt template.
+
+### AnthropicJudgeBackend
+
+Uses Claude to evaluate:
+- Did the agent accomplish the scenario's goal?
+- Are the generated files valid (syntax, types, tests)?
+- Did the agent introduce any breaking changes?
+
+The judge backend:
+1. Captures workspace state **before** and **after** agent execution
+2. Diffs the two states
+3. Prompts Claude (via `ANTHROPIC_API_KEY`) with the diff and the scenario description
+4. Returns a **pass** or **fail** verdict plus explanation
+
+**Success criteria:** The judge prompt asks Claude to verify that:
+- The prompt's requirements are met (e.g., "add a TypeScript interface")
+- Generated code is syntactically valid and type-checks
+- The agent did not break existing functionality
+- Output is reasonably well-commented (where applicable)
+
+The verdict is binary. A **pass** (exit code `0`) means the judge confirmed success; a **fail** (exit code `1`) means the judge reported failure or the agent encountered an error.
 
 ## Testing
 
