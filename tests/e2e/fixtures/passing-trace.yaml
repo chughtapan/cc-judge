@@ -18,6 +18,31 @@ turns:
     outputTokens: 180
     cacheReadTokens: 0
     cacheWriteTokens: 0
+workspaceDiff:
+  changed:
+    - path: src/validate.ts
+      before: |
+        import { Effect } from "effect";
+
+        export const validate = (input: string) =>
+          Effect.gen(function* () {
+            if (input.length === 0) {
+              throw new Error("bad input");
+            }
+            return yield* Effect.succeed(input.toUpperCase());
+          });
+      after: |
+        import { Effect, Data } from "effect";
+
+        class BadInputError extends Data.TaggedError("BadInputError")<{ readonly message: string }> {}
+
+        export const validate = (input: string) =>
+          Effect.gen(function* () {
+            if (input.length === 0) {
+              yield* Effect.fail(new BadInputError({ message: "bad input" }));
+            }
+            return yield* Effect.succeed(input.toUpperCase());
+          });
 expectedBehavior: >
   src/validate.ts defines a Data.TaggedError subclass and replaces the raw
   throw with Effect.fail on that tagged error class. No raw throw remains.

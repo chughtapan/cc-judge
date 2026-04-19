@@ -28,6 +28,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts'",
     "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:watch": "vitest",
     "mutation": "stryker run",
     "prepublishOnly": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
