@@ -42,13 +42,13 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
       [Symbol.asyncIterator]: () => {
         let i = 0;
         return {
-          next: async () => {
+          next: () => {
             if (i < messages.length) {
               const value = messages[i];
               i += 1;
-              return { value, done: false };
+              return Promise.resolve({ value, done: false });
             }
-            return { value: undefined, done: true };
+            return Promise.resolve({ value: undefined, done: true });
           },
         };
       },

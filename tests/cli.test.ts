@@ -1,9 +1,17 @@
-import { describe, expect } from "vitest";
+import { describe, it, expect } from "vitest";
 import { Effect } from "effect";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { runCommand, scoreCommand, main, type RunCliArgs, type ScoreCliArgs } from "../src/app/cli.js";
+import {
+  runCommand,
+  scoreCommand,
+  main,
+  parseRunArgs,
+  parseScoreArgs,
+  type RunCliArgs,
+  type ScoreCliArgs,
+} from "../src/app/cli.js";
 import { itEffect } from "./support/effect.js";
 
 const EXIT_RUNNER_RESOLUTION = 2;
@@ -164,8 +172,6 @@ describe("main (yargs dispatch)", () => {
   itEffect("main with explicit --judge model passes it through to parseRunArgs", function* () {
     const dir = tmpScenarioDir();
     const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-"));
-    // We only verify the yargs parse path doesn't error. Runtime bails on
-    // missing --image so exit is 2 (runner-resolution).
     const code = yield* main([
       "run",
       dir,
@@ -181,5 +187,214 @@ describe("main (yargs dispatch)", () => {
       "warn",
     ]);
     expect(code).toBe(EXIT_RUNNER_RESOLUTION);
+  });
+});
+
+// Direct tests for parseRunArgs / parseScoreArgs exercise the typeof defaults
+// that yargs' option defaults hide at runtime. Spec #38 Q2 amendment allows
+// widening the public surface when observable-behavior tests can't reach the
+// branch — parse-path defaults are otherwise unreachable via main().
+describe("parseRunArgs", () => {
+  it("supplies defaults for every optional field when raw is empty", () => {
+    const args = parseRunArgs({});
+    expect(args.scenarioPath).toBe("");
+    expect(args.runtime).toBe("docker");
+    expect(args.judge).toBe("claude-opus-4-7");
+    expect(args.judgeBackend).toBe("anthropic");
+    expect(args.runs).toBe(1);
+    expect(args.results).toBe("./eval-results");
+    expect(args.concurrency).toBe(1);
+    expect(args.logLevel).toBe("info");
+    expect(args.emitBraintrust).toBe(false);
+    expect(args.image).toBeUndefined();
+    expect(args.bin).toBeUndefined();
+    expect(args.scenarioIds).toBeUndefined();
+    expect(args.githubComment).toBeUndefined();
+    expect(args.githubCommentArtifactUrl).toBeUndefined();
+    expect(args.totalTimeoutMs).toBeUndefined();
+    expect(args.emitPromptfoo).toBeUndefined();
+  });
+
+  it("returns empty-default shape for non-object raw values", () => {
+    expect(parseRunArgs(null).scenarioPath).toBe("");
+    expect(parseRunArgs(42).scenarioPath).toBe("");
+    expect(parseRunArgs("string").scenarioPath).toBe("");
+    expect(parseRunArgs([]).scenarioPath).toBe("");
+  });
+
+  it("passes through string scenario + image + bin when provided", () => {
+    const args = parseRunArgs({
+      scenario: "/path/to/s",
+      runtime: "subprocess",
+      image: "my-img",
+      bin: "/usr/bin/claude",
+      judge: "claude-custom",
+      judgeBackend: "openai",
+      runs: 5,
+      scenarioIds: ["a", "b"],
+      results: "/out",
+      githubComment: 42,
+      githubCommentArtifactUrl: "https://example/art",
+      concurrency: 8,
+      logLevel: "debug",
+      totalTimeoutMs: 60_000,
+      emitBraintrust: true,
+      emitPromptfoo: "/p.json",
+    });
+    expect(args.scenarioPath).toBe("/path/to/s");
+    expect(args.runtime).toBe("subprocess");
+    expect(args.image).toBe("my-img");
+    expect(args.bin).toBe("/usr/bin/claude");
+    expect(args.judge).toBe("claude-custom");
+    expect(args.judgeBackend).toBe("openai");
+    expect(args.runs).toBe(5);
+    expect(args.scenarioIds).toEqual(["a", "b"]);
+    expect(args.results).toBe("/out");
+    expect(args.githubComment).toBe(42);
+    expect(args.githubCommentArtifactUrl).toBe("https://example/art");
+    expect(args.concurrency).toBe(8);
+    expect(args.logLevel).toBe("debug");
+    expect(args.totalTimeoutMs).toBe(60_000);
+    expect(args.emitBraintrust).toBe(true);
+    expect(args.emitPromptfoo).toBe("/p.json");
+  });
+
+  it("normalizes runtime to docker when value is neither docker nor subprocess", () => {
+    expect(parseRunArgs({ runtime: "wasm" }).runtime).toBe("docker");
+    expect(parseRunArgs({ runtime: null }).runtime).toBe("docker");
+    expect(parseRunArgs({ runtime: "" }).runtime).toBe("docker");
+  });
+
+  it("normalizes logLevel to info when value is not one of the four accepted levels", () => {
+    expect(parseRunArgs({ logLevel: "trace" }).logLevel).toBe("info");
+    expect(parseRunArgs({ logLevel: 7 }).logLevel).toBe("info");
+    expect(parseRunArgs({ logLevel: "WARN" }).logLevel).toBe("info"); // case-sensitive
+  });
+
+  it("accepts each valid logLevel value (debug/info/warn/error)", () => {
+    expect(parseRunArgs({ logLevel: "debug" }).logLevel).toBe("debug");
+    expect(parseRunArgs({ logLevel: "info" }).logLevel).toBe("info");
+    expect(parseRunArgs({ logLevel: "warn" }).logLevel).toBe("warn");
+    expect(parseRunArgs({ logLevel: "error" }).logLevel).toBe("error");
+  });
+
+  it("drops image / bin / scenarioIds / githubComment when the wrong type", () => {
+    const args = parseRunArgs({
+      image: 42,
+      bin: null,
+      scenarioIds: "not-an-array",
+      githubComment: "not-a-number",
+      githubCommentArtifactUrl: 99,
+      totalTimeoutMs: "not-a-number",
+      emitPromptfoo: 100,
+    });
+    expect(args.image).toBeUndefined();
+    expect(args.bin).toBeUndefined();
+    expect(args.scenarioIds).toBeUndefined();
+    expect(args.githubComment).toBeUndefined();
+    expect(args.githubCommentArtifactUrl).toBeUndefined();
+    expect(args.totalTimeoutMs).toBeUndefined();
+    expect(args.emitPromptfoo).toBeUndefined();
+  });
+
+  it("treats emitBraintrust non-true values as false (boolean strict equality)", () => {
+    expect(parseRunArgs({ emitBraintrust: false }).emitBraintrust).toBe(false);
+    expect(parseRunArgs({ emitBraintrust: "true" }).emitBraintrust).toBe(false);
+    expect(parseRunArgs({ emitBraintrust: 1 }).emitBraintrust).toBe(false);
+    expect(parseRunArgs({ emitBraintrust: true }).emitBraintrust).toBe(true);
+  });
+
+  it("returns runs=1 when runs is not a number", () => {
+    expect(parseRunArgs({ runs: "5" }).runs).toBe(1);
+    expect(parseRunArgs({ runs: null }).runs).toBe(1);
+  });
+
+  it("returns concurrency=1 when concurrency is not a number", () => {
+    expect(parseRunArgs({ concurrency: "8" }).concurrency).toBe(1);
+  });
+});
+
+describe("parseScoreArgs", () => {
+  it("supplies defaults for every optional field when raw is empty", () => {
+    const args = parseScoreArgs({});
+    expect(args.tracesPath).toBe("");
+    expect(args.traceFormat).toBe("canonical");
+    expect(args.judge).toBe("claude-opus-4-7");
+    expect(args.judgeBackend).toBe("anthropic");
+    expect(args.results).toBe("./eval-results");
+    expect(args.concurrency).toBe(1);
+    expect(args.logLevel).toBe("info");
+    expect(args.emitBraintrust).toBe(false);
+    expect(args.githubComment).toBeUndefined();
+    expect(args.githubCommentArtifactUrl).toBeUndefined();
+    expect(args.totalTimeoutMs).toBeUndefined();
+    expect(args.emitPromptfoo).toBeUndefined();
+  });
+
+  it("normalizes traceFormat to canonical when value is not `otel`", () => {
+    expect(parseScoreArgs({ traceFormat: "otel" }).traceFormat).toBe("otel");
+    expect(parseScoreArgs({ traceFormat: "canonical" }).traceFormat).toBe("canonical");
+    expect(parseScoreArgs({ traceFormat: "jaeger" }).traceFormat).toBe("canonical");
+    expect(parseScoreArgs({ traceFormat: null }).traceFormat).toBe("canonical");
+    expect(parseScoreArgs({ traceFormat: 42 }).traceFormat).toBe("canonical");
+  });
+
+  it("normalizes logLevel to info when value is not one of the four accepted levels", () => {
+    expect(parseScoreArgs({ logLevel: "trace" }).logLevel).toBe("info");
+    expect(parseScoreArgs({ logLevel: 7 }).logLevel).toBe("info");
+  });
+
+  it("passes through every valid field when raw is fully specified", () => {
+    const args = parseScoreArgs({
+      traces: "/trace.json",
+      traceFormat: "otel",
+      judge: "claude-custom",
+      judgeBackend: "openai",
+      results: "/out",
+      githubComment: 42,
+      githubCommentArtifactUrl: "https://example/art",
+      concurrency: 4,
+      logLevel: "warn",
+      totalTimeoutMs: 90_000,
+      emitBraintrust: true,
+      emitPromptfoo: "/p.json",
+    });
+    expect(args.tracesPath).toBe("/trace.json");
+    expect(args.traceFormat).toBe("otel");
+    expect(args.judge).toBe("claude-custom");
+    expect(args.judgeBackend).toBe("openai");
+    expect(args.results).toBe("/out");
+    expect(args.githubComment).toBe(42);
+    expect(args.githubCommentArtifactUrl).toBe("https://example/art");
+    expect(args.concurrency).toBe(4);
+    expect(args.logLevel).toBe("warn");
+    expect(args.totalTimeoutMs).toBe(90_000);
+    expect(args.emitBraintrust).toBe(true);
+    expect(args.emitPromptfoo).toBe("/p.json");
+  });
+
+  it("returns empty-default shape for non-object raw values", () => {
+    expect(parseScoreArgs(null).tracesPath).toBe("");
+    expect(parseScoreArgs(42).tracesPath).toBe("");
+    expect(parseScoreArgs([]).tracesPath).toBe("");
+  });
+
+  it("treats emitBraintrust non-true values as false", () => {
+    expect(parseScoreArgs({ emitBraintrust: "true" }).emitBraintrust).toBe(false);
+    expect(parseScoreArgs({ emitBraintrust: 1 }).emitBraintrust).toBe(false);
+    expect(parseScoreArgs({ emitBraintrust: true }).emitBraintrust).toBe(true);
+  });
+
+  it("drops githubComment / totalTimeoutMs / emitPromptfoo when the wrong type", () => {
+    const args = parseScoreArgs({
+      githubComment: "42",
+      githubCommentArtifactUrl: 99,
+      totalTimeoutMs: "not-a-number",
+      emitPromptfoo: 100,
+    });
+    expect(args.githubComment).toBeUndefined();
+    expect(args.githubCommentArtifactUrl).toBeUndefined();
+    expect(args.totalTimeoutMs).toBeUndefined();
+    expect(args.emitPromptfoo).toBeUndefined();
   });
 });
