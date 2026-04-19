@@ -195,7 +195,7 @@ function asObject(raw: unknown): YargsParsed {
   return out;
 }
 
-function parseRunArgs(raw: unknown): RunCliArgs {
+export function parseRunArgs(raw: unknown): RunCliArgs {
   const r = asObject(raw);
   const scenarioPath = typeof r["scenario"] === "string" ? r["scenario"] : "";
   const runtime = r["runtime"] === "subprocess" ? "subprocess" : "docker";
@@ -224,7 +224,7 @@ function parseRunArgs(raw: unknown): RunCliArgs {
   };
 }
 
-function parseScoreArgs(raw: unknown): ScoreCliArgs {
+export function parseScoreArgs(raw: unknown): ScoreCliArgs {
   const r = asObject(raw);
   const traceFormat = r["traceFormat"] === "otel" ? "otel" : "canonical";
   const logLevel = (r["logLevel"] === "debug" || r["logLevel"] === "info" || r["logLevel"] === "warn" || r["logLevel"] === "error")
