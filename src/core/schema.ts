@@ -18,6 +18,9 @@ import type {
   WorkspaceFile,
 } from "./types.js";
 
+export const ProjectIdSchema = Type.String({ minLength: 1, maxLength: 256 });
+export const RunIdSchema = Type.String({ minLength: 1, maxLength: 256 });
+export const AgentIdSchema = Type.String({ minLength: 1, maxLength: 256 });
 export const ScenarioIdSchema = Type.String({ minLength: 1, maxLength: 256 });
 export const TraceIdSchema = Type.String({ minLength: 1, maxLength: 256 });
 
@@ -28,6 +31,7 @@ export const IssueSeveritySchema = Type.Union([
 ]);
 
 export const RunSourceSchema = Type.Union([
+  Type.Literal("bundle"),
   Type.Literal("scenario"),
   Type.Literal("trace"),
 ]);
@@ -78,6 +82,55 @@ export const MetadataSchema = Type.Record(
   Type.Union([Type.String(), Type.Number(), Type.Boolean()]),
 );
 
+export const UnknownRecordSchema = Type.Record(Type.String(), Type.Unknown());
+
+export const ExecutionArtifactSchema = Type.Union([
+  Type.Object({
+    _tag: Type.Literal("DockerBuildArtifact"),
+    contextPath: Type.String({ minLength: 1 }),
+    dockerfilePath: Type.Optional(Type.String({ minLength: 1 })),
+    target: Type.Optional(Type.String({ minLength: 1 })),
+    buildArgs: Type.Optional(Type.Record(Type.String(), Type.String())),
+    imageTag: Type.Optional(Type.String({ minLength: 1 })),
+  }),
+  Type.Object({
+    _tag: Type.Literal("DockerImageArtifact"),
+    image: Type.String({ minLength: 1 }),
+    pullPolicy: Type.Optional(
+      Type.Union([
+        Type.Literal("always"),
+        Type.Literal("if-missing"),
+        Type.Literal("never"),
+      ]),
+    ),
+  }),
+]);
+
+export const AgentDeclarationSchema = Type.Object({
+  id: AgentIdSchema,
+  name: Type.String({ minLength: 1 }),
+  role: Type.Optional(Type.String({ minLength: 1 })),
+  artifact: ExecutionArtifactSchema,
+  promptInputs: UnknownRecordSchema,
+  metadata: Type.Optional(UnknownRecordSchema),
+});
+
+export const RunRequirementsSchema = Type.Object({
+  expectedBehavior: Type.String(),
+  validationChecks: Type.Array(Type.String({ minLength: 1 })),
+  judgeRubric: Type.Optional(Type.String()),
+});
+
+export const RunPlanSchema = Type.Object({
+  project: ProjectIdSchema,
+  scenarioId: ScenarioIdSchema,
+  name: Type.String({ minLength: 1 }),
+  description: Type.String(),
+  agents: Type.Array(AgentDeclarationSchema, { minItems: 1 }),
+  requirements: RunRequirementsSchema,
+  metadata: Type.Optional(UnknownRecordSchema),
+});
+
 export const TraceEventSchema = Type.Union([
   Type.Object({
     type: Type.Literal("message"),
@@ -119,6 +172,45 @@ export const AgentRefSchema = Type.Object({
   name: Type.String(),
   role: Type.Optional(Type.String()),
   metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+});
+
+export const AgentTurnSchema = Type.Object({
+  turn: TurnSchema,
+  agentId: Type.Optional(AgentIdSchema),
+});
+
+export const AgentLifecycleStatusSchema = Type.Union([
+  Type.Literal("completed"),
+  Type.Literal("timed_out"),
+  Type.Literal("failed_to_start"),
+  Type.Literal("runtime_error"),
+  Type.Literal("cancelled"),
+]);
+
+export const AgentOutcomeSchema = Type.Object({
+  agentId: AgentIdSchema,
+  status: AgentLifecycleStatusSchema,
+  startedAt: Type.Optional(Type.String()),
+  endedAt: Type.String(),
+  exitCode: Type.Optional(Type.Integer()),
+  reason: Type.Optional(Type.String()),
+});
+
+export const JudgmentBundleSchema = Type.Object({
+  runId: RunIdSchema,
+  project: ProjectIdSchema,
+  scenarioId: ScenarioIdSchema,
+  name: Type.String({ minLength: 1 }),
+  description: Type.String(),
+  requirements: RunRequirementsSchema,
+  agents: Type.Array(AgentRefSchema, { minItems: 1 }),
+  turns: Type.Optional(Type.Array(AgentTurnSchema)),
+  events: Type.Optional(Type.Array(TraceEventSchema)),
+  phases: Type.Optional(Type.Array(PhaseSchema)),
+  context: Type.Optional(UnknownRecordSchema),
+  workspaceDiff: Type.Optional(WorkspaceDiffSchema),
+  outcomes: Type.Array(AgentOutcomeSchema, { minItems: 1 }),
+  metadata: Type.Optional(UnknownRecordSchema),
 });
 
 // YAML-shaped Scenario. Function-valued deterministic checks cannot round-trip
@@ -333,7 +425,9 @@ export const PromptfooResultsSchema = Type.Object({
 export type IssueStatic = Static<typeof IssueSchema>;
 export type JudgeResultStatic = Static<typeof JudgeResultSchema>;
 export type RunRecordStatic = Static<typeof RunRecordSchema>;
+export type RunPlanStatic = Static<typeof RunPlanSchema>;
 export type TraceStatic = Static<typeof TraceSchema>;
+export type JudgmentBundleStatic = Static<typeof JudgmentBundleSchema>;
 
 // Helper: format TypeBox error list into short messages for the SchemaInvalid error cause.
 export function formatSchemaErrors(errors: Iterable<{ path: string; message: string }>): ReadonlyArray<string> {

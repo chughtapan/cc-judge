@@ -6,7 +6,17 @@
 import { Effect } from "effect";
 import { Value } from "@sinclair/typebox/value";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { Turn, WorkspaceDiff, Issue, IssueSeverity, TraceEvent, Phase, AgentRef } from "../core/types.js";
+import type {
+  AgentRef,
+  AgentTurn,
+  Issue,
+  IssueSeverity,
+  JudgmentBundle,
+  Phase,
+  TraceEvent,
+  Turn,
+  WorkspaceDiff,
+} from "../core/types.js";
 import {
   type JudgeResult,
   type Scenario,
@@ -28,6 +38,8 @@ export interface JudgeBackend {
   readonly name: string;
   judge(input: JudgeInput): Effect.Effect<JudgeResult, never, never>;
 }
+
+export type JudgeBundleInput = JudgmentBundle;
 
 export interface AnthropicJudgeBackendOpts {
   readonly model?: string;
@@ -102,6 +114,92 @@ function renderEvents(events: ReadonlyArray<TraceEvent>): string {
 
 function renderAgents(agents: ReadonlyArray<AgentRef>): string {
   return agents.map((a) => `- ${a.name} (${a.id})${a.role ? ` role=${a.role}` : ""}`).join("\n");
+}
+
+function bundleToScenario(bundle: JudgmentBundle): Scenario {
+  return {
+    id: bundle.scenarioId,
+    name: bundle.name,
+    description: bundle.description,
+    setupPrompt: "",
+    expectedBehavior: bundle.requirements.expectedBehavior,
+    validationChecks: bundle.requirements.validationChecks,
+    ...(bundle.requirements.judgeRubric !== undefined ? { judgeRubric: bundle.requirements.judgeRubric } : {}),
+  };
+}
+
+function bundleTurnsToTurns(bundle: JudgmentBundle): ReadonlyArray<Turn> {
+  return bundle.turns?.map((entry) => entry.turn) ?? [];
+}
+
+function bundleTurnsToEvents(bundle: JudgmentBundle): ReadonlyArray<TraceEvent> | undefined {
+  if (bundle.events !== undefined && bundle.events.length > 0) {
+    return bundle.events;
+  }
+  if (bundle.turns === undefined || bundle.turns.length === 0) {
+    return undefined;
+  }
+  const agentNameById = new Map(bundle.agents.map((agent) => [agent.id, agent.name]));
+  const events: TraceEvent[] = [];
+  for (const entry of bundle.turns) {
+    events.push(...turnEntryToEvents(entry, agentNameById));
+  }
+  return events;
+}
+
+function turnEntryToEvents(
+  entry: AgentTurn,
+  agentNameById: ReadonlyMap<string, string>,
+): ReadonlyArray<TraceEvent> {
+  const promptTs = Date.parse(entry.turn.startedAt);
+  const safePromptTs = Number.isFinite(promptTs) ? promptTs : Date.now();
+  const agentId = entry.agentId;
+  const agentName = agentId !== undefined
+    ? (agentNameById.get(agentId) ?? agentId)
+    : "assistant";
+  return [
+    {
+      type: "message",
+      from: "user",
+      to: agentName,
+      channel: "prompt",
+      text: entry.turn.prompt,
+      ts: safePromptTs,
+    },
+    {
+      type: "message",
+      from: agentName,
+      channel: "response",
+      text: entry.turn.response,
+      ts: safePromptTs + entry.turn.latencyMs,
+    },
+  ];
+}
+
+export function bundleToJudgeInput(bundle: JudgmentBundle, abortSignal?: AbortSignal): JudgeInput {
+  const events = bundleTurnsToEvents(bundle);
+  const context = {
+    ...(bundle.context ?? {}),
+    agentOutcomes: bundle.outcomes,
+  };
+  return {
+    scenario: bundleToScenario(bundle),
+    turns: bundleTurnsToTurns(bundle),
+    ...(bundle.workspaceDiff !== undefined ? { workspaceDiff: bundle.workspaceDiff } : {}),
+    ...(events !== undefined ? { events } : {}),
+    ...(bundle.phases !== undefined ? { phases: bundle.phases } : {}),
+    ...(bundle.agents.length > 0 ? { agents: bundle.agents } : {}),
+    ...(Object.keys(context).length > 0 ? { context } : {}),
+    ...(abortSignal !== undefined ? { abortSignal } : {}),
+  };
+}
+
+export function judgeBundle(
+  backend: JudgeBackend,
+  bundle: JudgmentBundle,
+  abortSignal?: AbortSignal,
+): Effect.Effect<JudgeResult, never, never> {
+  return backend.judge(bundleToJudgeInput(bundle, abortSignal));
 }
 
 function renderPrompt(input: JudgeInput): string {
