@@ -1,6 +1,7 @@
-import { describe, expect } from "vitest";
-import { Effect } from "effect";
+import { describe, expect, vi } from "vitest";
+import { Deferred, Effect, Exit } from "effect";
 import { DefaultRunCoordinator, PromptWorkspaceHarness, type AgentRuntime, type RuntimeHandle } from "../src/runner/index.js";
+import { HarnessExecutionError } from "../src/core/errors.js";
 import {
   AgentId,
   ProjectId,
@@ -37,6 +38,20 @@ function makePlan(): RunPlan {
       expectedBehavior: "both agents respond",
       validationChecks: ["each agent emits one response"],
     },
+  };
+}
+
+function makeSingleAgentPlan(): RunPlan {
+  const [agent] = makePlan().agents;
+  if (agent === undefined) {
+    throw new Error("missing agent fixture");
+  }
+  return {
+    ...makePlan(),
+    agents: [agent],
+    scenarioId: ScenarioId("single-agent"),
+    name: "single-agent",
+    description: "single-agent prompt harness",
   };
 }
 
@@ -85,6 +100,71 @@ class FakeRuntime implements AgentRuntime {
   }
 }
 
+class AbortAwareRuntime implements AgentRuntime {
+  readonly kind = "docker" as const;
+  readonly stopped: string[] = [];
+  seenAbortSignal: AbortSignal | undefined;
+  aborted = false;
+  readonly #promptReady: Deferred.Deferred<void, never>;
+
+  constructor(promptReady: Deferred.Deferred<void, never>) {
+    this.#promptReady = promptReady;
+  }
+
+  get promptReady(): Deferred.Deferred<void, never> {
+    return this.#promptReady;
+  }
+
+  prepare(agent: AgentDeclaration): Effect.Effect<RuntimeHandle, never, never> {
+    const runtime = this;
+    return Effect.succeed({
+      agent,
+      kind: "docker",
+      workspaceDir: `/tmp/${agent.id}`,
+      writeWorkspace() {
+        return Effect.void;
+      },
+      executePrompt(_prompt: string, opts: { readonly timeoutMs: number; readonly abortSignal?: AbortSignal }): Effect.Effect<Turn, HarnessExecutionError, never> {
+        void opts.timeoutMs;
+        return Effect.async((resume) => {
+          runtime.seenAbortSignal = opts.abortSignal;
+          const onAbort = () => {
+            runtime.aborted = true;
+            resume(
+              Effect.fail(
+                new HarnessExecutionError({
+                  cause: {
+                    _tag: "ExecutionFailed",
+                    message: "aborted",
+                  },
+                }),
+              ),
+            );
+          };
+          if (opts.abortSignal?.aborted === true) {
+            onAbort();
+            return Effect.void;
+          }
+          opts.abortSignal?.addEventListener("abort", onAbort, { once: true });
+          Effect.runSync(Deferred.succeed(runtime.#promptReady, undefined));
+          return Effect.sync(() => {
+            opts.abortSignal?.removeEventListener("abort", onAbort);
+          });
+        });
+      },
+      diffWorkspace() {
+        return Effect.succeed({ changed: [] });
+      },
+    });
+  }
+
+  stop(handle: RuntimeHandle): Effect.Effect<void, never, never> {
+    return Effect.sync(() => {
+      this.stopped.push(handle.agent.id);
+    });
+  }
+}
+
 describe("DefaultRunCoordinator + PromptWorkspaceHarness", () => {
   itEffect("coordinates a multi-agent run and emits a normalized bundle", function* () {
     const runtime = new FakeRuntime();
@@ -116,5 +196,45 @@ describe("DefaultRunCoordinator + PromptWorkspaceHarness", () => {
       },
     });
     expect(runtime.stopped.sort()).toEqual(["agent-1", "agent-2"]);
+  });
+
+  itEffect("assigns unique run IDs even when Date.now is constant", function* () {
+    const runtime = new FakeRuntime();
+    const coordinator = new DefaultRunCoordinator(runtime);
+    const harness = new PromptWorkspaceHarness({
+      prompts: ["solve"],
+      workspace: [{ path: "README.md", content: "seed" }],
+    });
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_726_000_000_000);
+    try {
+      const first = yield* coordinator.execute(makePlan(), harness);
+      const second = yield* coordinator.execute(makePlan(), harness);
+      expect(first.runId).not.toBe(second.runId);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  itEffect("forwards abort signals into the live prompt path", function* () {
+    const promptReady = yield* Deferred.make<void>();
+    const runtime = new AbortAwareRuntime(promptReady);
+    const coordinator = new DefaultRunCoordinator(runtime);
+    const harness = new PromptWorkspaceHarness({
+      prompts: ["wait"],
+      workspace: [{ path: "README.md", content: "seed" }],
+    });
+    const abortController = new AbortController();
+    const fiber = yield* Effect.fork(coordinator.execute(makeSingleAgentPlan(), harness, {
+      abortSignal: abortController.signal,
+    }));
+
+    yield* Deferred.await(promptReady);
+    expect(runtime.seenAbortSignal).toBe(abortController.signal);
+    abortController.abort();
+
+    const exit = yield* fiber.await;
+    expect(runtime.seenAbortSignal).toBe(abortController.signal);
+    expect(runtime.aborted).toBe(true);
+    expect(Exit.isFailure(exit)).toBe(true);
   });
 });

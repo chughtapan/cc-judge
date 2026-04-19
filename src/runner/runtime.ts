@@ -40,7 +40,7 @@ export interface RuntimeHandle {
   writeWorkspace(files: ReadonlyArray<WorkspaceFile>): Effect.Effect<void, HarnessExecutionError, never>;
   executePrompt(
     prompt: string,
-    opts: { readonly timeoutMs: number },
+    opts: { readonly timeoutMs: number; readonly abortSignal?: AbortSignal },
   ): Effect.Effect<Turn, AgentRunTimeoutError | HarnessExecutionError, never>;
   diffWorkspace(): Effect.Effect<WorkspaceDiff, never, never>;
 }
@@ -256,6 +256,7 @@ function createDockerHandle(params: {
         params.claudeArgs,
         prompt,
         opts.timeoutMs,
+        opts.abortSignal,
       );
     },
     diffWorkspace() {
@@ -279,7 +280,16 @@ function createSubprocessHandle(params: {
       return writeWorkspaceFiles(params.workspaceDir, params.state, files, params.plan, params.agent);
     },
     executePrompt(prompt, opts) {
-      return runSubprocessPrompt(params.plan, params.agent, params.state, params.workspaceDir, params.opts, prompt, opts.timeoutMs);
+      return runSubprocessPrompt(
+        params.plan,
+        params.agent,
+        params.state,
+        params.workspaceDir,
+        params.opts,
+        prompt,
+        opts.timeoutMs,
+        opts.abortSignal,
+      );
     },
     diffWorkspace() {
       return diffWorkspace(params.workspaceDir, params.state);
@@ -337,17 +347,19 @@ function runDockerPrompt(
   claudeArgs: ReadonlyArray<string>,
   prompt: string,
   timeoutMs: number,
+  abortSignal?: AbortSignal,
 ): Effect.Effect<Turn, AgentRunTimeoutError | HarnessExecutionError, never> {
-  return runPromptProcess({
-    cmd: "docker",
-    args: ["exec", containerId, "claude", ...claudeArgs, prompt],
-    plan,
-    agent,
-    state,
-    prompt,
-    timeoutMs,
-  });
-}
+    return runPromptProcess({
+      cmd: "docker",
+      args: ["exec", containerId, "claude", ...claudeArgs, prompt],
+      plan,
+      agent,
+      state,
+      prompt,
+      timeoutMs,
+      ...(abortSignal !== undefined ? { abortSignal } : {}),
+    });
+  }
 
 function runSubprocessPrompt(
   plan: RunPlan,
@@ -357,6 +369,7 @@ function runSubprocessPrompt(
   opts: SubprocessRuntimeOpts,
   prompt: string,
   timeoutMs: number,
+  abortSignal?: AbortSignal,
 ): Effect.Effect<Turn, AgentRunTimeoutError | HarnessExecutionError, never> {
   const args = [...(opts.extraArgs ?? DEFAULT_CLAUDE_ARGS), prompt];
   const env = opts.env !== undefined ? { ...process.env, ...opts.env } : process.env;
@@ -370,6 +383,7 @@ function runSubprocessPrompt(
     state,
     prompt,
     timeoutMs,
+    ...(abortSignal !== undefined ? { abortSignal } : {}),
   });
 }
 
@@ -383,12 +397,14 @@ function runPromptProcess(params: {
   readonly state: MutableWorkspaceState;
   readonly prompt: string;
   readonly timeoutMs: number;
+  readonly abortSignal?: AbortSignal;
 }): Effect.Effect<Turn, AgentRunTimeoutError | HarnessExecutionError, never> {
-  return Effect.async((resume) => {
+  return Effect.async((resume, signal) => {
     let finished = false;
     const turnIndex = params.state.turnsExecuted;
     const startedAt = new Date().toISOString();
     const startMs = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const child: ChildProcess = spawn(params.cmd, [...params.args], {
       cwd: params.cwd,
       env: params.env,
@@ -396,22 +412,54 @@ function runPromptProcess(params: {
     });
     let stdout = "";
     let stderr = "";
+    const abortError = () =>
+      new HarnessExecutionError({
+        cause: {
+          _tag: "ExecutionFailed",
+          message: `${params.agent.id} prompt execution aborted`,
+        },
+      });
+    const cleanup = () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      params.abortSignal?.removeEventListener("abort", onAbort);
+      signal.removeEventListener("abort", onAbort);
+      try {
+        child.kill("SIGKILL");
+      } catch (error) {
+        void error;
+      }
+    };
+    const onAbort = () => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      cleanup();
+      resume(Effect.fail(abortError()));
+    };
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
-    const timer = setTimeout(() => {
+    if (params.abortSignal?.aborted === true || signal.aborted === true) {
+      finished = true;
+      cleanup();
+      resume(Effect.fail(abortError()));
+      return Effect.void;
+    }
+    params.abortSignal?.addEventListener("abort", onAbort, { once: true });
+    signal.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
       if (finished) {
         return;
       }
       finished = true;
-      try {
-        child.kill("SIGKILL");
-      } catch (error) {
-        void error;
-      }
+      cleanup();
       resume(
         Effect.fail(
           new AgentRunTimeoutError({
@@ -427,7 +475,7 @@ function runPromptProcess(params: {
         return;
       }
       finished = true;
-      clearTimeout(timer);
+      cleanup();
       params.state.turnsExecuted += 1;
       const parsed = parseStreamJson(stdout);
       const responseText = parsed.response.length > 0 ? parsed.response : stderr;
@@ -451,7 +499,7 @@ function runPromptProcess(params: {
         return;
       }
       finished = true;
-      clearTimeout(timer);
+      cleanup();
       resume(
         Effect.fail(
           new HarnessExecutionError({
@@ -463,14 +511,7 @@ function runPromptProcess(params: {
         ),
       );
     });
-    return Effect.sync(() => {
-      clearTimeout(timer);
-      try {
-        child.kill("SIGKILL");
-      } catch (error) {
-        void error;
-      }
-    });
+    return Effect.sync(cleanup);
   });
 }
 

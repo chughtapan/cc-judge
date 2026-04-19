@@ -3,6 +3,7 @@
 // failures fold into per-run RunRecords; the pipeline always produces a Report.
 
 import { Effect } from "effect";
+import { randomUUID } from "node:crypto";
 import type { Report, RunRecord, Scenario, Trace, JudgeResult } from "../core/schema.js";
 import type {
   JudgmentBundle,
@@ -624,7 +625,7 @@ function coordinationFailureBundle(
   outcomes: ReadonlyArray<JudgmentBundle["outcomes"][number]>,
 ): JudgmentBundle {
   return {
-    runId: RunId(`${plan.project}:${plan.scenarioId}:failed:${Date.now()}`),
+    runId: RunId(randomUUID()),
     project: plan.project,
     scenarioId: plan.scenarioId,
     name: plan.name,

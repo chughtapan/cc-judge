@@ -1,7 +1,15 @@
 import { mkdtempSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect } from "vitest";
+import { describe, expect, vi } from "vitest";
+
+const { randomUUIDMock } = vi.hoisted(() => ({
+  randomUUIDMock: vi.fn(),
+}));
+
+vi.mock("node:crypto", () => ({
+  randomUUID: randomUUIDMock,
+}));
 import { Effect } from "effect";
 import { runWithHarness } from "../src/app/pipeline.js";
 import { RunCoordinationError } from "../src/core/errors.js";
@@ -126,5 +134,47 @@ describe("runWithHarness failure folding", () => {
     expect(report.runs[0]?.reason).toContain("alpha cancelled");
     expect(report.runs[0]?.reason).toContain("beta cancelled");
     expect(report.runs[0]?.reason).not.toContain("runtime_error");
+  });
+
+  itEffect("uses a unique runId for each deterministic failure bundle", function* () {
+    const judge: JudgeBackend = {
+      name: "should-not-run",
+      judge() {
+        return Effect.die("judge should not run for coordinator failures");
+      },
+    };
+    const coordinator = {
+      execute() {
+        return Effect.fail(
+          new RunCoordinationError({
+            cause: {
+              _tag: "HarnessFailed",
+              detail: {
+                _tag: "ExecutionFailed",
+                message: "aborted",
+              },
+            },
+          }),
+        );
+      },
+    };
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_726_000_000_000);
+    randomUUIDMock.mockReturnValueOnce("run-one").mockReturnValueOnce("run-two");
+    try {
+      yield* runWithHarness(makePlan(), unusedHarness, {
+        coordinator,
+        judge,
+        resultsDir: mkdtempSync(path.join(os.tmpdir(), "cc-judge-fold-runid-1-")),
+      });
+      yield* runWithHarness(makePlan(), unusedHarness, {
+        coordinator,
+        judge,
+        resultsDir: mkdtempSync(path.join(os.tmpdir(), "cc-judge-fold-runid-2-")),
+      });
+      expect(randomUUIDMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      nowSpy.mockRestore();
+      randomUUIDMock.mockReset();
+    }
   });
 });

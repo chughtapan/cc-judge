@@ -1,6 +1,8 @@
 import { Effect } from "effect";
 import { Value } from "@sinclair/typebox/value";
+import { randomUUID } from "node:crypto";
 import {
+  AgentRunTimeoutError,
   AgentStartError,
   BundleBuildError,
   HarnessExecutionError,
@@ -49,7 +51,7 @@ export interface ExecutionHarness {
     execution: PreparedRunContext,
     sink: NormalizedBundleSink,
     opts: { readonly abortSignal?: AbortSignal },
-  ): Effect.Effect<void, HarnessExecutionError, never>;
+  ): Effect.Effect<void, HarnessExecutionError | AgentRunTimeoutError, never>;
 }
 
 export interface RunCoordinator {
@@ -83,9 +85,7 @@ export class DefaultRunCoordinator implements RunCoordinator {
     harness: ExecutionHarness,
     opts: RunCoordinatorOpts = {},
   ): Effect.Effect<JudgmentBundle, RunCoordinationError, never> {
-    const runId = RunId(
-      opts.runId ?? `${plan.project}:${plan.scenarioId}:${Date.now()}`,
-    );
+    const runId = RunId(opts.runId ?? randomUUID());
     const sink = makeNormalizedBundleSink(plan, runId);
     const handles: RuntimeHandle[] = [];
     const harnessOpts = opts.abortSignal !== undefined ? { abortSignal: opts.abortSignal } : {};
@@ -135,14 +135,15 @@ export class PromptWorkspaceHarness implements ExecutionHarness {
     plan: RunPlan,
     execution: PreparedRunContext,
     sink: NormalizedBundleSink,
-  ): Effect.Effect<void, HarnessExecutionError, never> {
+    opts: { readonly abortSignal?: AbortSignal },
+  ): Effect.Effect<void, HarnessExecutionError | AgentRunTimeoutError, never> {
     const config = this.#config;
     return Effect.gen(function* () {
       const perAgentDiffs = new Map<AgentId, WorkspaceDiff>();
       yield* Effect.forEach(
         plan.agents,
         (agent) =>
-          runPromptSequence(agent.id, execution, sink, config).pipe(
+          runPromptSequence(agent.id, execution, sink, config, opts.abortSignal).pipe(
             Effect.tap(({ diff }) =>
               Effect.sync(() => {
                 perAgentDiffs.set(agent.id, diff);
@@ -310,7 +311,8 @@ function runPromptSequence(
   execution: PreparedRunContext,
   sink: NormalizedBundleSink,
   config: PromptWorkspaceHarnessConfig,
-): Effect.Effect<{ readonly diff: WorkspaceDiff }, HarnessExecutionError, never> {
+  abortSignal: AbortSignal | undefined,
+): Effect.Effect<{ readonly diff: WorkspaceDiff }, HarnessExecutionError | AgentRunTimeoutError, never> {
   return Effect.gen(function* () {
     const handle = yield* execution.getHandle(agentId);
     if (config.workspace !== undefined && config.workspace.length > 0) {
@@ -322,9 +324,13 @@ function runPromptSequence(
       const result = yield* Effect.either(
         handle.executePrompt(prompt, {
           timeoutMs: config.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
+          ...(abortSignal !== undefined ? { abortSignal } : {}),
         }),
       );
       if (result._tag === "Left") {
+        if (abortSignal?.aborted === true) {
+          return yield* Effect.fail(result.left);
+        }
         const endedAt = new Date().toISOString();
         if (result.left._tag === "AgentRunTimeoutError") {
           yield* sink.recordOutcome({
