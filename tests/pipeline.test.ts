@@ -1,14 +1,20 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect } from "vitest";
 import { Effect } from "effect";
 import { mkdtempSync } from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { runScenarios, scoreTraces } from "../src/app/pipeline.js";
-import { ScenarioId, TraceId } from "../src/core/types.js";
+import { ScenarioId, TraceId, ISSUE_SEVERITY, RUN_SOURCE } from "../src/core/types.js";
 import type { Scenario, Trace, JudgeResult } from "../src/core/schema.js";
 import type { JudgeBackend } from "../src/judge/index.js";
 import type { AgentRunner, AgentHandle } from "../src/runner/index.js";
 import type { AgentStartError, AgentRunTimeoutError } from "../src/core/errors.js";
+import { itEffect } from "./support/effect.js";
+
+const EXPECTED_TOTAL_ONE = 1;
+const EXPECTED_PASSED_ONE = 1;
+const EXPECTED_FAILED_ONE = 1;
+const HAPPY_TRACE_ID = "t-1";
 
 const stubJudge: JudgeBackend = {
   name: "stub",
@@ -84,39 +90,35 @@ function makeScenario(id: string): Scenario {
 }
 
 describe("runScenarios", () => {
-  it("produces a Report with pass counts for a happy-path runner+judge", async () => {
+  itEffect("produces a Report with pass counts for a happy-path runner+judge", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
-    const report = await Effect.runPromise(
-      runScenarios([makeScenario("happy")], {
-        runner: stubRunner,
-        judge: stubJudge,
-        resultsDir: dir,
-      }),
-    );
-    expect(report.summary.total).toBe(1);
-    expect(report.summary.passed).toBe(1);
+    const report = yield* runScenarios([makeScenario("happy")], {
+      runner: stubRunner,
+      judge: stubJudge,
+      resultsDir: dir,
+    });
+    expect(report.summary.total).toBe(EXPECTED_TOTAL_ONE);
+    expect(report.summary.passed).toBe(EXPECTED_PASSED_ONE);
     expect(report.runs[0]?.pass).toBe(true);
   });
 
-  it("reports failure when judge fails", async () => {
+  itEffect("reports failure when judge fails", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
-    const report = await Effect.runPromise(
-      runScenarios([makeScenario("sad")], {
-        runner: stubRunner,
-        judge: failingJudge,
-        resultsDir: dir,
-      }),
-    );
-    expect(report.summary.failed).toBe(1);
-    expect(report.runs[0]?.overallSeverity).toBe("significant");
+    const report = yield* runScenarios([makeScenario("sad")], {
+      runner: stubRunner,
+      judge: failingJudge,
+      resultsDir: dir,
+    });
+    expect(report.summary.failed).toBe(EXPECTED_FAILED_ONE);
+    expect(report.runs[0]?.overallSeverity).toBe(ISSUE_SEVERITY.Significant);
   });
 });
 
 describe("scoreTraces", () => {
-  it("builds records from traces without invoking a runner", async () => {
+  itEffect("builds records from traces without invoking a runner", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
     const trace: Trace = {
-      traceId: TraceId("t-1"),
+      traceId: TraceId(HAPPY_TRACE_ID),
       name: "trace",
       turns: [
         {
@@ -135,11 +137,9 @@ describe("scoreTraces", () => {
       expectedBehavior: "greets",
       validationChecks: ["says hello"],
     };
-    const report = await Effect.runPromise(
-      scoreTraces([trace], { judge: stubJudge, resultsDir: dir }),
-    );
-    expect(report.summary.total).toBe(1);
-    expect(report.runs[0]?.source).toBe("trace");
-    expect(report.runs[0]?.traceId).toBe("t-1");
+    const report = yield* scoreTraces([trace], { judge: stubJudge, resultsDir: dir });
+    expect(report.summary.total).toBe(EXPECTED_TOTAL_ONE);
+    expect(report.runs[0]?.source).toBe(RUN_SOURCE.Trace);
+    expect(report.runs[0]?.traceId).toBe(HAPPY_TRACE_ID);
   });
 });
