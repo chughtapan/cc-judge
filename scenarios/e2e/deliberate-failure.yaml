@@ -1,0 +1,16 @@
+id: e2e.deliberate-failure
+name: "E2E: deliberate failure — impossible constraint"
+description: >
+  Agent receives a task that is impossible to satisfy: write a TypeScript
+  function that returns both 1 and 2 simultaneously. This scenario is
+  designed to fail so we can assert exit code 1 (any-fail).
+
+setupPrompt: |
+  Open src/impossible.ts. Write a function `dual()` that returns 1 AND 2
+  at the same time from a single return statement. The function must have
+  return type `number`. Write the result to src/impossible.ts.
+
+workspace:
+  - path: src/impossible.ts
+    content: |
+      // TODO: implement dual()

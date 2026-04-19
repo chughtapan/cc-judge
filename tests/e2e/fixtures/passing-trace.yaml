@@ -1,0 +1,27 @@
+traceId: e2e-fixture-trace-001
+name: "E2E fixture: passing trace for score command"
+turns:
+  - index: 0
+    prompt: "Refactor the validate function to use tagged errors"
+    response: |
+      I'll refactor the function to use Effect.fail with a tagged error class.
+
+      ```typescript
+      class BadInputError extends Data.TaggedError("BadInputError")<{ readonly message: string }> {}
+      ```
+
+      The raw throw has been replaced with `yield* Effect.fail(new BadInputError({ message: "bad input" }))`.
+    startedAt: "2026-04-19T00:00:00.000Z"
+    latencyMs: 5200
+    toolCallCount: 2
+    inputTokens: 350
+    outputTokens: 180
+    cacheReadTokens: 0
+    cacheWriteTokens: 0
+expectedBehavior: >
+  src/validate.ts defines a Data.TaggedError subclass and replaces the raw
+  throw with Effect.fail on that tagged error class. No raw throw remains.
+validationChecks:
+  - "src/validate.ts defines a class extending Data.TaggedError"
+  - "src/validate.ts uses Effect.fail with a tagged error instance"
+  - "src/validate.ts no longer contains 'throw new Error' inside the validate function body"

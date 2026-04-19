@@ -1,0 +1,33 @@
+id: e2e.noop-passthrough
+name: "E2E: no-op passthrough — already correct code"
+description: >
+  Agent receives a TypeScript module that already follows best practices.
+  The task is to add JSDoc comments. The code itself should remain unchanged
+  — this validates the pipeline works when the agent makes minimal changes.
+
+setupPrompt: |
+  Open src/math.ts. Add JSDoc comments to the two exported functions. Do not
+  change any logic, signatures, or imports. Only add JSDoc documentation.
+  Write the updated file back to src/math.ts.
+
+workspace:
+  - path: src/math.ts
+    content: |
+      export function add(a: number, b: number): number {
+        return a + b;
+      }
+
+      export function multiply(a: number, b: number): number {
+        return a * b;
+      }
+
+timeoutMs: 180000
+
+expectedBehavior: >
+  src/math.ts still exports add and multiply with identical signatures and
+  logic. JSDoc comments are present on both functions.
+
+validationChecks:
+  - "src/math.ts exports an add function with the same signature (a: number, b: number): number"
+  - "src/math.ts exports a multiply function with the same signature (a: number, b: number): number"
+  - "The return values of add and multiply are unchanged (add returns a + b, multiply returns a * b)"

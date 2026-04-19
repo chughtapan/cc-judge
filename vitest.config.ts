@@ -8,5 +8,6 @@ export default defineConfig({
     poolOptions: {
       forks: { singleFork: true },
     },
+    exclude: ["tests/e2e/**/*.test.ts"],
   },
 });
