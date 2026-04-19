@@ -11,7 +11,7 @@ export default {
   ignoreStatic: true,
   incremental: true,
   incrementalFile: '.stryker-tmp/incremental.json',
-  concurrency: 8,
+  concurrency: 4,
   // Break landed at 49 rather than the original 50 because CI is 0.72 points
   // below local (49.37 vs 50.09) — subprocess-spawn timing is less stable in
   // the GitHub Actions runner. The next mutation-score-lift sub-task closes
