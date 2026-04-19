@@ -30,12 +30,15 @@ const STRUCTURED_PASS_VERDICT = {
 
 // ── Mock the Claude Agent SDK so judge() never touches a real network ────────
 // `query` returns an async-iterable of SDK messages; tests set the sequence
-// per case via __setNextMessages / __setNextSequence.
+// per case via __setNextMessages / __setNextSequence. Also captures the
+// prompt passed to query() so tests can assert on renderPrompt / renderDiff.
 let nextMessageSequence: ReadonlyArray<ReadonlyArray<unknown>> = [];
 let attemptIndex = 0;
+const capturedPrompts: string[] = [];
 
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
-  query: vi.fn(() => {
+  query: vi.fn((args: { prompt: string }) => {
+    capturedPrompts.push(args.prompt);
     const messages = nextMessageSequence[attemptIndex] ?? [];
     attemptIndex += 1;
     return {
@@ -59,6 +62,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 function setAttemptsToSequence(sequences: ReadonlyArray<ReadonlyArray<unknown>>): void {
   nextMessageSequence = sequences;
   attemptIndex = 0;
+  capturedPrompts.length = 0;
 }
 
 function successResultMessage(resultJson: unknown, structured?: unknown): unknown {
@@ -337,4 +341,187 @@ describe("AnthropicJudgeBackend", () => {
     expect(result.reason).toContain("MalformedJson");
     expect(attemptIndex).toBe(RETRY_THREE + 1);
   }, 10_000);
+});
+
+// Targeted kills for renderPrompt + renderDiff + collectAssistantText branches
+// observed as survivors in the epic #37 mutation run.
+describe("AnthropicJudgeBackend prompt content", () => {
+  const CONTENT_A = "new-content-a";
+  const CONTENT_B = "new-content-b";
+  const CONTENT_LONG = "xxxxxxxxxxxxx";
+  const PATH_ADDED = "added.txt";
+  const PATH_REMOVED = "removed.txt";
+  const PATH_MODIFIED = "modified.txt";
+
+  itEffect("renderDiff emits `+ added` lines with byte count for before=null entries", function* () {
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    const diff: WorkspaceDiff = {
+      changed: [{ path: PATH_ADDED, before: null, after: CONTENT_A }],
+    };
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input(diff));
+    expect(capturedPrompts[0]).toContain(`+ added ${PATH_ADDED}`);
+    expect(capturedPrompts[0]).toContain(`${CONTENT_A.length} bytes`);
+  });
+
+  itEffect("renderDiff emits `- removed` lines for after=null entries", function* () {
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    const diff: WorkspaceDiff = {
+      changed: [{ path: PATH_REMOVED, before: CONTENT_A, after: null }],
+    };
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input(diff));
+    expect(capturedPrompts[0]).toContain(`- removed ${PATH_REMOVED}`);
+  });
+
+  itEffect("renderDiff emits `~ modified` for both-non-null entries", function* () {
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    const diff: WorkspaceDiff = {
+      changed: [{ path: PATH_MODIFIED, before: CONTENT_A, after: CONTENT_B }],
+    };
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input(diff));
+    expect(capturedPrompts[0]).toContain(`~ modified ${PATH_MODIFIED}`);
+  });
+
+  itEffect("renderDiff emits `(no workspace changes)` when diff is undefined", function* () {
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(capturedPrompts[0]).toContain("(no workspace changes)");
+  });
+
+  itEffect("renderDiff emits `(no workspace changes)` when diff has empty changed array", function* () {
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input({ changed: [] }));
+    expect(capturedPrompts[0]).toContain("(no workspace changes)");
+  });
+
+  itEffect("renderDiff joins multiple entries with newlines (all three kinds in one diff)", function* () {
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    const diff: WorkspaceDiff = {
+      changed: [
+        { path: PATH_ADDED, before: null, after: CONTENT_A },
+        { path: PATH_REMOVED, before: CONTENT_LONG, after: null },
+        { path: PATH_MODIFIED, before: CONTENT_A, after: CONTENT_B },
+      ],
+    };
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input(diff));
+    const prompt = capturedPrompts[0];
+    expect(prompt).toContain(`+ added ${PATH_ADDED}`);
+    expect(prompt).toContain(`- removed ${PATH_REMOVED}`);
+    expect(prompt).toContain(`~ modified ${PATH_MODIFIED}`);
+  });
+
+  itEffect("renderPrompt includes scenario name, description, expectedBehavior, and validationChecks", function* () {
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    const scen: Scenario = {
+      id: ScenarioId("named-scen"),
+      name: "SomeScenarioName",
+      description: "SomeDescription",
+      setupPrompt: "SomeSetup",
+      expectedBehavior: "SomeExpectedBehavior",
+      validationChecks: ["CheckOne", "CheckTwo"],
+    };
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge({
+      scenario: scen,
+      turns: [makeTurn(PROMPT_USER, RESPONSE_ASSISTANT)],
+    });
+    const prompt = capturedPrompts[0];
+    expect(prompt).toContain("# Scenario: SomeScenarioName");
+    expect(prompt).toContain("Description: SomeDescription");
+    expect(prompt).toContain("Expected behavior: SomeExpectedBehavior");
+    expect(prompt).toContain("1. CheckOne");
+    expect(prompt).toContain("2. CheckTwo");
+  });
+
+  itEffect("renderTurns emits USER and ASSISTANT labels with turn index", function* () {
+    setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
+    yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge({
+      scenario: makeScenario("s"),
+      turns: [
+        {
+          index: 0,
+          prompt: "first-prompt",
+          response: "first-response",
+          startedAt: "2026-04-18T00:00:00.000Z",
+          latencyMs: 1,
+          toolCallCount: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+        {
+          index: 1,
+          prompt: "second-prompt",
+          response: "second-response",
+          startedAt: "2026-04-18T00:00:00.000Z",
+          latencyMs: 1,
+          toolCallCount: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      ],
+    });
+    const prompt = capturedPrompts[0];
+    expect(prompt).toContain("--- Turn 0 ---");
+    expect(prompt).toContain("USER: first-prompt");
+    expect(prompt).toContain("ASSISTANT: first-response");
+    expect(prompt).toContain("--- Turn 1 ---");
+    expect(prompt).toContain("USER: second-prompt");
+  });
+
+  itEffect("collectAssistantText concatenates multiple text blocks within one assistant message", function* () {
+    setAttemptsToSequence([[{
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: '{"pass":true,' },
+          { type: "text", text: '"reason":"ok",' },
+          { type: "text", text: '"issues":[],"overallSeverity":null,"judgeConfidence":0.5}' },
+        ],
+      },
+    }]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.pass).toBe(true);
+    expect(result.reason).toBe("ok");
+  });
+
+  itEffect("collectAssistantText skips non-text blocks (e.g. tool_use / image) in content arrays", function* () {
+    setAttemptsToSequence([[{
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", name: "calculator", input: {} },
+          { type: "text", text: '{"pass":true,"reason":"t","issues":[],"overallSeverity":null,"judgeConfidence":0.5}' },
+          { type: "image", source: {} },
+        ],
+      },
+    }]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.pass).toBe(true);
+  });
+
+  itEffect("collectAssistantText skips assistant messages whose content is not an array", function* () {
+    setAttemptsToSequence([[
+      { type: "assistant", message: { content: "plain string" } },
+      successResultMessage('{"pass":false,"reason":"x","issues":[],"overallSeverity":null}'),
+    ]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.pass).toBe(false);
+  });
+
+  itEffect("collectAssistantText skips blocks with missing or non-string .text", function* () {
+    setAttemptsToSequence([[{
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: 42 },
+          { type: "text" },
+          { type: "text", text: '{"pass":true,"reason":"x","issues":[],"overallSeverity":null}' },
+        ],
+      },
+    }]]);
+    const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
+    expect(result.pass).toBe(true);
+  });
 });

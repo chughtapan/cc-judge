@@ -439,4 +439,206 @@ describe("runScenarios edge cases (pipeline hardening)", () => {
       if (prevImg !== undefined) process.env["CC_JUDGE_DOCKER_IMAGE"] = prevImg;
     }
   });
+
+  itEffect("resolves SubprocessRunner from CC_JUDGE_SUBPROCESS_BIN env var", function* () {
+    const prevBin = process.env["CC_JUDGE_SUBPROCESS_BIN"];
+    process.env["CC_JUDGE_SUBPROCESS_BIN"] = "/bin/true";
+    try {
+      const result = yield* Effect.either(
+        runScenarios([], { judge: stubJudge }),
+      );
+      expect(result._tag).toBe("Right");
+      if (result._tag === "Right") {
+        expect(result.right.summary.total).toBe(0);
+      }
+    } finally {
+      if (prevBin !== undefined) process.env["CC_JUDGE_SUBPROCESS_BIN"] = prevBin;
+      else delete process.env["CC_JUDGE_SUBPROCESS_BIN"];
+    }
+  });
+
+  itEffect("resolves DockerRunner from CC_JUDGE_DOCKER_IMAGE env var when subprocess bin is absent", function* () {
+    const prevBin = process.env["CC_JUDGE_SUBPROCESS_BIN"];
+    const prevImg = process.env["CC_JUDGE_DOCKER_IMAGE"];
+    delete process.env["CC_JUDGE_SUBPROCESS_BIN"];
+    process.env["CC_JUDGE_DOCKER_IMAGE"] = "dummy:latest";
+    try {
+      const result = yield* Effect.either(
+        runScenarios([], { judge: stubJudge }),
+      );
+      expect(result._tag).toBe("Right");
+    } finally {
+      if (prevBin !== undefined) process.env["CC_JUDGE_SUBPROCESS_BIN"] = prevBin;
+      if (prevImg !== undefined) process.env["CC_JUDGE_DOCKER_IMAGE"] = prevImg;
+      else delete process.env["CC_JUDGE_DOCKER_IMAGE"];
+    }
+  });
+});
+
+// Targeted kills for specific survivors observed in the epic #37 final run:
+// summarizeDiff branches, criticalJudgeFromError issue-array shape,
+// buildRecord start-failure invariants.
+describe("runScenarios targeted assertions", () => {
+  const DIFF_ADDED_TWO = 2;
+  const DIFF_REMOVED_ONE = 1;
+  const DIFF_CHANGED_ZERO = 0;
+  const DIFF_ADDED_ZERO = 0;
+  const DIFF_REMOVED_TWO = 2;
+  const DIFF_CHANGED_THREE = 3;
+
+  itEffect("summarizeDiff counts pure additions (before=null, after!=null)", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const trace: Trace = {
+      traceId: TraceId("add-only"),
+      name: "add",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+      workspaceDiff: {
+        changed: [
+          { path: "new1.txt", before: null, after: "content1" },
+          { path: "new2.txt", before: null, after: "content2" },
+        ],
+      },
+    };
+    const report = yield* scoreTraces([trace], { judge: stubJudge, resultsDir: dir });
+    const sum = report.runs[0]?.workspaceDiffSummary;
+    expect(sum?.added).toBe(DIFF_ADDED_TWO);
+    expect(sum?.removed).toBe(DIFF_ADDED_ZERO);
+    expect(sum?.changed).toBe(DIFF_CHANGED_ZERO);
+  });
+
+  itEffect("summarizeDiff counts pure modifications (before!=null, after!=null)", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const trace: Trace = {
+      traceId: TraceId("mod-only"),
+      name: "mod",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+      workspaceDiff: {
+        changed: [
+          { path: "a.txt", before: "old-a", after: "new-a" },
+          { path: "b.txt", before: "old-b", after: "new-b" },
+          { path: "c.txt", before: "old-c", after: "new-c" },
+        ],
+      },
+    };
+    const report = yield* scoreTraces([trace], { judge: stubJudge, resultsDir: dir });
+    const sum = report.runs[0]?.workspaceDiffSummary;
+    expect(sum?.added).toBe(DIFF_ADDED_ZERO);
+    expect(sum?.removed).toBe(DIFF_ADDED_ZERO);
+    expect(sum?.changed).toBe(DIFF_CHANGED_THREE);
+  });
+
+  itEffect("summarizeDiff counts pure removals (before!=null, after=null)", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const trace: Trace = {
+      traceId: TraceId("rm-only"),
+      name: "rm",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+      workspaceDiff: {
+        changed: [
+          { path: "gone1.txt", before: "x", after: null },
+          { path: "gone2.txt", before: "y", after: null },
+        ],
+      },
+    };
+    const report = yield* scoreTraces([trace], { judge: stubJudge, resultsDir: dir });
+    const sum = report.runs[0]?.workspaceDiffSummary;
+    expect(sum?.removed).toBe(DIFF_REMOVED_TWO);
+    expect(sum?.added).toBe(DIFF_ADDED_ZERO);
+    expect(sum?.changed).toBe(DIFF_CHANGED_ZERO);
+  });
+
+  itEffect("summarizeDiff zero'd when no workspaceDiff is provided", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const trace: Trace = {
+      traceId: TraceId("no-diff"),
+      name: "nd",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+    const report = yield* scoreTraces([trace], { judge: stubJudge, resultsDir: dir });
+    const sum = report.runs[0]?.workspaceDiffSummary;
+    expect(sum?.added).toBe(DIFF_ADDED_ZERO);
+    expect(sum?.removed).toBe(DIFF_ADDED_ZERO);
+    expect(sum?.changed).toBe(DIFF_CHANGED_ZERO);
+  });
+
+  itEffect("criticalJudgeFromError produces a single critical-severity issue", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const startFailingRunner: AgentRunner = {
+      ...stubRunner,
+      start(scenario) {
+        return Effect.fail({
+          _tag: "AgentStartError",
+          scenarioId: scenario.id,
+          cause: { _tag: "WorkspacePathEscape", wfPath: "bad" },
+        } as unknown as AgentStartError);
+      },
+    };
+    const report = yield* runScenarios([makeScenario("start-fail-issues")], {
+      runner: startFailingRunner,
+      judge: stubJudge,
+      resultsDir: dir,
+    });
+    const rec = report.runs[0];
+    expect(rec?.issues.length).toBe(1);
+    expect(rec?.issues[0]?.severity).toBe(ISSUE_SEVERITY.Critical);
+    expect(rec?.issues[0]?.issue.length).toBeGreaterThan(0);
+  });
+
+  itEffect("buildRecord on runner-start failure uses empty transcriptPath and nonnegative latency", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const startFailingRunner: AgentRunner = {
+      ...stubRunner,
+      start(scenario) {
+        return Effect.fail({
+          _tag: "AgentStartError",
+          scenarioId: scenario.id,
+          cause: { _tag: "WorkspacePathEscape", wfPath: "bad" },
+        } as unknown as AgentStartError);
+      },
+    };
+    const report = yield* runScenarios([makeScenario("start-fail-record")], {
+      runner: startFailingRunner,
+      judge: stubJudge,
+      resultsDir: dir,
+    });
+    const rec = report.runs[0];
+    expect(rec?.transcriptPath).toBe("");
+    expect(rec?.latencyMs).toBeGreaterThanOrEqual(0);
+  });
+
+  itEffect("invokes obs.onRun for every record and obs.onReport once per run", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const onRunCalls: string[] = [];
+    let onReportCalls = 0;
+    const obs = {
+      name: "test-obs",
+      onRun: ({ record }: { record: { scenarioId: string } }) => {
+        onRunCalls.push(record.scenarioId);
+        return Effect.void;
+      },
+      onReport: () => {
+        onReportCalls += 1;
+        return Effect.void;
+      },
+    };
+    yield* runScenarios(
+      [makeScenario(SCEN_ID_ALPHA), makeScenario(SCEN_ID_BETA)],
+      {
+        runner: stubRunner,
+        judge: stubJudge,
+        resultsDir: dir,
+        emitters: [obs],
+      },
+    );
+    expect(onRunCalls.sort()).toEqual([SCEN_ID_ALPHA, SCEN_ID_BETA]);
+    expect(onReportCalls).toBe(1);
+  });
 });
