@@ -1,11 +1,10 @@
-// Day-one safer floor: eslint-plugin-safer-by-default @ recommended preset
-// (the renamed published form of agent-code-guard), plus the @typescript-eslint
-// companion plugin for baseline TS hygiene.
+// Day-one safer floor: eslint-plugin-agent-code-guard @ recommended preset,
+// plus the @typescript-eslint companion plugin for baseline TS hygiene.
 //
 // Spec rev 2 invariant #11: strict tsconfig + Effect + TypeBox + this plugin
 // at recommended is the initial-commit floor for cc-judge.
 
-import guard from "eslint-plugin-safer-by-default";
+import guard from "eslint-plugin-agent-code-guard";
 import tsParser from "@typescript-eslint/parser";
 import tseslint from "@typescript-eslint/eslint-plugin";
 
@@ -19,7 +18,7 @@ export default [
       parserOptions: { ecmaVersion: 2022, sourceType: "module" },
     },
     plugins: {
-      "safer-by-default": guard,
+      "agent-code-guard": guard,
       "@typescript-eslint": tseslint,
     },
     rules: {
@@ -29,22 +28,39 @@ export default [
     },
   },
 
-  // Block 2: tests. Looser rules (no `no-vitest-mocks` here either way; we lean on real integrations).
+  // Block 2: tests. Start from recommended, then carve out the two rules that
+  // fight vitest idioms today: `async-keyword` (tests use async/await; Effect.gen
+  // conversion lands in a follow-up) and `no-hardcoded-assertion-literals` (many
+  // assertions still use raw literals). Both carve-outs are temporary and removed
+  // when /safer:implement-senior rewrites the suite.
   {
-    files: ["tests/**/*.ts", "**/*.test.ts"],
+    files: ["tests/**/*.ts", "**/*.test.ts", "**/*.spec.ts"],
     languageOptions: {
       parser: tsParser,
       parserOptions: { ecmaVersion: 2022, sourceType: "module" },
     },
     plugins: {
-      "safer-by-default": guard,
+      "agent-code-guard": guard,
       "@typescript-eslint": tseslint,
     },
     rules: {
-      "safer-by-default/bare-catch": "error",
-      "safer-by-default/no-hardcoded-secrets": "error",
+      ...guard.configs.recommended.rules,
+      "agent-code-guard/async-keyword": "off",
+      "agent-code-guard/no-hardcoded-assertion-literals": "off",
       "@typescript-eslint/no-explicit-any": "warn",
     },
+  },
+
+  // Block 3: integration tests. Enables no-vitest-mocks so integration suites
+  // cannot mock the boundary they're supposed to be exercising for real.
+  {
+    files: ["tests/integration/**/*.ts", "**/*.integration.test.ts"],
+    languageOptions: {
+      parser: tsParser,
+      parserOptions: { ecmaVersion: 2022, sourceType: "module" },
+    },
+    plugins: { "agent-code-guard": guard },
+    rules: guard.configs.integrationTests.rules,
   },
 
   {

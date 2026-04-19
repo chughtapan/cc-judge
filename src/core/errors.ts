@@ -24,6 +24,7 @@ export type AgentStartErrorCause =
   | { readonly _tag: "ImageMissing"; readonly image: string }
   | { readonly _tag: "ContainerStartFailed"; readonly message: string }
   | { readonly _tag: "BinaryNotFound"; readonly path: string }
+  | { readonly _tag: "WorkspacePathEscape"; readonly wfPath: string }
   | { readonly _tag: "WorkspaceSetupFailed"; readonly message: string };
 
 export class AgentRunTimeoutError extends Data.TaggedError("AgentRunTimeoutError")<{

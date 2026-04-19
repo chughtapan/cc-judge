@@ -38,18 +38,23 @@ describe("SubprocessRunner.start()", () => {
     }
   });
 
-  it("returns AgentStartError{WorkspaceSetupFailed} when workspace path escapes root", async () => {
+  it("returns AgentStartError{WorkspacePathEscape} when workspace path escapes root", async () => {
     const runner = new SubprocessRunner({ bin: "/bin/echo" });
+    const escapeRelPath = "../escape";
     const scenario = makeScenario({
       // Path escapes root — schema blocks this at decode time; this tests the
       // defense-in-depth path inside makeWorkspace().
-      workspace: [{ path: "../escape", content: "bad" }] as Scenario["workspace"],
+      workspace: [{ path: escapeRelPath, content: "bad" }] as Scenario["workspace"],
     });
     const result = await Effect.runPromise(Effect.either(runner.start(scenario)));
     expect(result._tag).toBe("Left");
     if (result._tag === "Left") {
       expect(result.left._tag).toBe("AgentStartError");
-      expect(result.left.cause._tag).toBe("WorkspaceSetupFailed");
+      const cause = result.left.cause;
+      expect(cause._tag).toBe("WorkspacePathEscape");
+      if (cause._tag === "WorkspacePathEscape") {
+        expect(cause.wfPath).toBe(escapeRelPath);
+      }
     }
   });
 
@@ -426,7 +431,7 @@ describe("SubprocessRunner.stop()", () => {
 
 describe("SubprocessRunner.start() property: never throws", () => {
   // Generates scenarios including deliberately unsafe workspace paths to exercise
-  // the WorkspaceSetupFailed branch, alongside safe paths that succeed.
+  // the WorkspacePathEscape branch, alongside safe paths that succeed.
   const safePathArb = fc
     .string({ minLength: 1, maxLength: 40 })
     .filter((s) => !s.includes("/") && !s.includes("\\") && !s.includes("..") && s.trim().length > 0)
