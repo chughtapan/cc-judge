@@ -62,3 +62,49 @@ export class RunnerResolutionError extends Data.TaggedError("RunnerResolutionErr
 export type RunnerResolutionCause =
   | { readonly _tag: "NoRunnerConfigured" }
   | { readonly _tag: "InvalidRuntime"; readonly value: string };
+
+// ── Tag constants ──────────────────────────────────────────────────────────
+// Re-export the `_tag` literal values so callers discriminate via a single
+// source of truth (including tests). Principle 1: one name for one string.
+
+export const ERROR_TAG = {
+  LoadError: "LoadError",
+  AgentStartError: "AgentStartError",
+  AgentRunTimeoutError: "AgentRunTimeoutError",
+  TotalTimeoutExceeded: "TotalTimeoutExceeded",
+  TraceDecodeError: "TraceDecodeError",
+  PublishError: "PublishError",
+  RunnerResolutionError: "RunnerResolutionError",
+} as const;
+
+export const LOAD_ERROR_CAUSE = {
+  FileNotFound: "FileNotFound",
+  GlobNoMatches: "GlobNoMatches",
+  ParseFailure: "ParseFailure",
+  SchemaInvalid: "SchemaInvalid",
+  DuplicateId: "DuplicateId",
+} as const satisfies Record<LoadErrorCause["_tag"], LoadErrorCause["_tag"]>;
+
+export const AGENT_START_CAUSE = {
+  ImageMissing: "ImageMissing",
+  ContainerStartFailed: "ContainerStartFailed",
+  BinaryNotFound: "BinaryNotFound",
+  WorkspacePathEscape: "WorkspacePathEscape",
+  WorkspaceSetupFailed: "WorkspaceSetupFailed",
+} as const satisfies Record<AgentStartErrorCause["_tag"], AgentStartErrorCause["_tag"]>;
+
+export const TRACE_DECODE_CAUSE = {
+  UnknownFormat: "UnknownFormat",
+  SchemaInvalid: "SchemaInvalid",
+} as const satisfies Record<TraceDecodeCause["_tag"], TraceDecodeCause["_tag"]>;
+
+export const PUBLISH_ERROR_CAUSE = {
+  GhCliMissing: "GhCliMissing",
+  GhCliFailed: "GhCliFailed",
+  BodyTooLarge: "BodyTooLarge",
+} as const satisfies Record<PublishErrorCause["_tag"], PublishErrorCause["_tag"]>;
+
+export const RUNNER_RESOLUTION_CAUSE = {
+  NoRunnerConfigured: "NoRunnerConfigured",
+  InvalidRuntime: "InvalidRuntime",
+} as const satisfies Record<RunnerResolutionCause["_tag"], RunnerResolutionCause["_tag"]>;
