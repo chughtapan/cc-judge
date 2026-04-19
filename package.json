@@ -1,6 +1,6 @@
 {
   "name": "cc-judge",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "TypeScript CLI + SDK that runs Claude Code agents in isolated workspaces, judges transcripts with an LLM, and emits a summary.md + results.jsonl + details/*.yaml report triple with Braintrust + Promptfoo telemetry.",
   "type": "module",
   "main": "./dist/index.js",

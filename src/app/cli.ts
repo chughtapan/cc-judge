@@ -186,7 +186,7 @@ export function scoreCommand(args: ScoreCliArgs): Effect.Effect<CliExitCode, nev
 }
 
 function resolveTraceFiles(pathOrGlob: string): ReadonlyArray<string> {
-  const isDir = (() => { try { return statSync(pathOrGlob).isDirectory(); } catch { return false; } })();
+  const isDir = (() => { try { return statSync(pathOrGlob).isDirectory(); } catch (_e) { return false; } })();
   if (isDir) {
     return readdirSync(pathOrGlob)
       .filter((f) => f.endsWith(".json") || f.endsWith(".yaml") || f.endsWith(".yml"))
