@@ -3,12 +3,15 @@
 
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import type {
+  AgentRef,
   DeterministicCtx,
   Issue,
   IssueSeverity,
+  Phase,
   RunNumber,
   RunSource,
   ScenarioId,
+  TraceEvent,
   TraceId,
   Turn,
   WorkspaceDiff,
@@ -75,6 +78,49 @@ export const MetadataSchema = Type.Record(
   Type.Union([Type.String(), Type.Number(), Type.Boolean()]),
 );
 
+export const TraceEventSchema = Type.Union([
+  Type.Object({
+    type: Type.Literal("message"),
+    from: Type.String(),
+    to: Type.Optional(Type.String()),
+    channel: Type.String(),
+    text: Type.String(),
+    ts: Type.Number(),
+  }),
+  Type.Object({
+    type: Type.Literal("phase"),
+    phase: Type.String(),
+    round: Type.Optional(Type.Number()),
+    ts: Type.Number(),
+  }),
+  Type.Object({
+    type: Type.Literal("action"),
+    agent: Type.String(),
+    action: Type.String(),
+    channel: Type.String(),
+    ts: Type.Number(),
+  }),
+  Type.Object({
+    type: Type.Literal("state"),
+    snapshot: Type.Record(Type.String(), Type.Unknown()),
+    ts: Type.Number(),
+  }),
+]);
+
+export const PhaseSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  name: Type.String(),
+  tsStart: Type.Number(),
+  tsEnd: Type.Optional(Type.Number()),
+});
+
+export const AgentRefSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  name: Type.String(),
+  role: Type.Optional(Type.String()),
+  metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+});
+
 // YAML-shaped Scenario. Function-valued deterministic checks cannot round-trip
 // through YAML; they are TS-only. ScenarioYamlSchema is the strict decode target.
 export const ScenarioYamlSchema = Type.Object({
@@ -88,6 +134,7 @@ export const ScenarioYamlSchema = Type.Object({
   expectedBehavior: Type.String(),
   validationChecks: Type.Array(Type.String({ minLength: 1 })),
   metadata: Type.Optional(MetadataSchema),
+  judgeRubric: Type.Optional(Type.String()),
 });
 
 // Full Scenario is the YAML shape plus TS-only function fields. Not a boundary
@@ -107,6 +154,7 @@ export interface Scenario {
   readonly deterministicPassCheck?: (ctx: DeterministicCtx) => boolean;
   readonly deterministicFailCheck?: (ctx: DeterministicCtx) => boolean;
   readonly metadata?: Readonly<Record<string, string | number | boolean>>;
+  readonly judgeRubric?: string;
 }
 
 export const JudgeResultSchema = Type.Object({
@@ -214,6 +262,11 @@ export const TraceSchema = Type.Object({
   expectedBehavior: Type.String(),
   validationChecks: Type.Array(Type.String()),
   metadata: Type.Optional(MetadataSchema),
+  events: Type.Optional(Type.Array(TraceEventSchema)),
+  phases: Type.Optional(Type.Array(PhaseSchema)),
+  agents: Type.Optional(Type.Array(AgentRefSchema)),
+  context: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  judgeRubric: Type.Optional(Type.String()),
 });
 
 export interface Trace {
@@ -225,6 +278,11 @@ export interface Trace {
   readonly expectedBehavior: string;
   readonly validationChecks: ReadonlyArray<string>;
   readonly metadata?: Readonly<Record<string, string | number | boolean>>;
+  readonly events?: ReadonlyArray<TraceEvent>;
+  readonly phases?: ReadonlyArray<Phase>;
+  readonly agents?: ReadonlyArray<AgentRef>;
+  readonly context?: Readonly<Record<string, unknown>>;
+  readonly judgeRubric?: string;
 }
 
 // Promptfoo results shape (external contract). Minimal: one record per run.
