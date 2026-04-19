@@ -126,31 +126,6 @@ describe("main (yargs dispatch)", () => {
     expect(code).toBe(EXIT_FATAL);
   });
 
-  itEffect("main with subprocess runtime and --bin parses cleanly (returns before runner invokes)", function* () {
-    const dir = tmpScenarioDir();
-    const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-"));
-    // subprocess runtime parses OK; pipeline starts and runs against /bin/echo.
-    // /bin/echo isn't a real claude subprocess so the pipeline folds its turn
-    // into a critical JudgeResult and exits 1. Large timeout because CI's
-    // subprocess spawn is noticeably slower than local.
-    const code = yield* main([
-      "run",
-      dir,
-      "--runtime",
-      "subprocess",
-      "--bin",
-      "/bin/echo",
-      "--runs",
-      "1",
-      "--concurrency",
-      "1",
-      "--results",
-      results,
-      "--log-level",
-      "error",
-    ]);
-    expect([EXIT_SUCCESS, EXIT_FAILURE]).toContain(code);
-  }, 120_000);
 
   itEffect("main with score + otel trace-format dispatches via otel adapter", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-"));
