@@ -518,11 +518,14 @@ function buildDockerImage(
       }
       const autoTag = `cc-judge-${sanitizeId(plan.scenarioId)}-${sanitizeId(agent.id)}-${Date.now()}`;
       const imageTag = artifact.imageTag ?? autoTag;
+      const dockerfilePath = artifact.dockerfilePath !== undefined
+        ? path.resolve(contextPath, artifact.dockerfilePath)
+        : undefined;
       const args = [
         "build",
         "-t",
         imageTag,
-        ...(artifact.dockerfilePath !== undefined ? ["-f", artifact.dockerfilePath] : []),
+        ...(dockerfilePath !== undefined ? ["-f", dockerfilePath] : []),
         ...(artifact.target !== undefined ? ["--target", artifact.target] : []),
         ...renderBuildArgs(artifact.buildArgs),
         contextPath,

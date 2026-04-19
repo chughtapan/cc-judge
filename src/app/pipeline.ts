@@ -33,7 +33,13 @@ import {
 } from "../runner/index.js";
 import { makeReportEmitter, type ReportEmitter } from "../emit/report.js";
 import type { ObservabilityEmitter } from "../emit/observability.js";
-import { RunnerResolutionError } from "../core/errors.js";
+import {
+  RunCoordinationError,
+  RunnerResolutionError,
+  type AgentStartErrorCause,
+  type BundleBuildCause,
+  type HarnessExecutionCause,
+} from "../core/errors.js";
 import type { HarnessRunOpts, PlannedRunInput, RunOpts, ScoreOpts } from "./opts.js";
 
 const DEFAULT_RUNS_PER_SCENARIO = 1;
@@ -429,17 +435,18 @@ function runOnePlannedInput(
     const startMs = Date.now();
     const executionOpts = abortSignal !== undefined ? { abortSignal } : {};
     const execution = yield* Effect.either(coordinator.execute(input.plan, input.harness, executionOpts));
-    const bundle = execution._tag === "Right"
-      ? execution.right
-      : coordinationFailureBundle(input.plan, execution.left);
-    const judgeResult = yield* judgeBundle(judge, bundle, abortSignal);
-    const record = buildBundleRecord({
-      bundle,
-      judge: judgeResult,
-      judgeModel: judge.name,
-      startedAt,
-      latencyMs: Date.now() - startMs,
-    });
+    const latencyMs = Date.now() - startMs;
+    const record = execution._tag === "Right"
+      ? buildBundleRecord({
+          bundle: execution.right,
+          judge: yield* judgeBundle(judge, execution.right, abortSignal),
+          judgeModel: judge.name,
+          startedAt,
+          latencyMs,
+        })
+      : buildBundleRecord(
+          coordinationFailureRecordInput(input.plan, execution.left, startedAt, latencyMs, abortSignal),
+        );
     yield* emitter.emitRun(record);
     yield* Effect.forEach(obs, (observer) => observer.onRun({ record }), { discard: true });
     return record;
@@ -586,7 +593,36 @@ function scoreOneBundle(
   });
 }
 
-function coordinationFailureBundle(plan: RunPlan, error: { readonly cause: { readonly _tag: string } }): JudgmentBundle {
+function coordinationFailureRecordInput(
+  plan: RunPlan,
+  error: RunCoordinationError,
+  startedAt: string,
+  latencyMs: number,
+  abortSignal: AbortSignal | undefined,
+): {
+  readonly bundle: JudgmentBundle;
+  readonly judge: JudgeResult;
+  readonly judgeModel: string;
+  readonly startedAt: string;
+  readonly latencyMs: number;
+} {
+  const endedAt = nowIso();
+  const outcomes = coordinationFailureOutcomes(plan, error, endedAt, abortSignal);
+  const judge = deterministicFailureJudge(outcomes);
+  return {
+    bundle: coordinationFailureBundle(plan, error, outcomes),
+    judge,
+    judgeModel: "deterministic/coordinator",
+    startedAt,
+    latencyMs,
+  };
+}
+
+function coordinationFailureBundle(
+  plan: RunPlan,
+  error: RunCoordinationError,
+  outcomes: ReadonlyArray<JudgmentBundle["outcomes"][number]>,
+): JudgmentBundle {
   return {
     runId: RunId(`${plan.project}:${plan.scenarioId}:failed:${Date.now()}`),
     project: plan.project,
@@ -595,15 +631,117 @@ function coordinationFailureBundle(plan: RunPlan, error: { readonly cause: { rea
     description: plan.description,
     requirements: plan.requirements,
     agents: plan.agents.map(agentRefFromDeclaration),
-    outcomes: plan.agents.map((agent) => ({
-      agentId: agent.id,
-      status: "runtime_error" as const,
-      endedAt: nowIso(),
-      reason: `coordination failed: ${error.cause._tag}`,
-    })),
+    outcomes: [...outcomes],
     metadata: {
       coordinationFailure: error.cause._tag,
       modelName: `${plan.project}/coordinator`,
+      failureFold: "deterministic",
     },
   };
+}
+
+function coordinationFailureOutcomes(
+  plan: RunPlan,
+  error: RunCoordinationError,
+  endedAt: string,
+  abortSignal: AbortSignal | undefined,
+): ReadonlyArray<JudgmentBundle["outcomes"][number]> {
+  const cancelledReason = abortSignal?.aborted === true
+    ? "run cancelled via abort signal"
+    : "run cancelled after another agent failed";
+  const cause = error.cause;
+  switch (cause._tag) {
+    case "AgentStartFailed":
+      return plan.agents.map((agent) =>
+        agent.id === cause.agentId
+          ? {
+              agentId: agent.id,
+              status: "failed_to_start" as const,
+              endedAt,
+              reason: renderAgentStartCause(cause.detail),
+            }
+          : {
+              agentId: agent.id,
+              status: "cancelled" as const,
+              endedAt,
+              reason: cancelledReason,
+            });
+    case "HarnessFailed":
+      return plan.agents.map((agent) => ({
+        agentId: agent.id,
+        status: abortSignal?.aborted === true ? "cancelled" as const : "runtime_error" as const,
+        endedAt,
+        reason: abortSignal?.aborted === true ? cancelledReason : renderHarnessFailureCause(cause.detail),
+      }));
+    case "BundleBuildFailed":
+      return plan.agents.map((agent) => ({
+        agentId: agent.id,
+        status: abortSignal?.aborted === true ? "cancelled" as const : "runtime_error" as const,
+        endedAt,
+        reason: abortSignal?.aborted === true ? cancelledReason : renderBundleBuildFailureCause(cause.detail),
+      }));
+  }
+}
+
+function deterministicFailureJudge(
+  outcomes: ReadonlyArray<JudgmentBundle["outcomes"][number]>,
+): JudgeResult {
+  const issues = outcomes.map((outcome) => ({
+    issue: `${outcome.agentId} ${outcome.status}${outcome.reason !== undefined ? `: ${outcome.reason}` : ""}`,
+    severity: "critical" as const,
+  }));
+  return {
+    pass: false,
+    reason: `coordination failed: ${issues.map((issue) => issue.issue).join("; ")}`,
+    issues,
+    overallSeverity: "critical",
+    retryCount: 0,
+  };
+}
+
+function renderAgentStartCause(cause: AgentStartErrorCause): string {
+  switch (cause._tag) {
+    case "BuildContextMissing":
+      return `build context missing at ${cause.path}`;
+    case "DockerBuildFailed":
+      return `docker build failed: ${cause.message}`;
+    case "ImageMissing":
+      return `image missing: ${cause.image}`;
+    case "ImagePullFailed":
+      return `image pull failed for ${cause.image}: ${cause.message}`;
+    case "ContainerStartFailed":
+      return `container start failed: ${cause.message}`;
+    case "BinaryNotFound":
+      return `binary not found: ${cause.path}`;
+    case "WorkspacePathEscape":
+      return `workspace path escaped root: ${cause.wfPath}`;
+    case "WorkspaceSetupFailed":
+      return `workspace setup failed: ${cause.message}`;
+  }
+}
+
+function renderHarnessFailureCause(cause: HarnessExecutionCause): string {
+  switch (cause._tag) {
+    case "MissingRuntimeHandle":
+      return `missing runtime handle for ${cause.agentId}`;
+    case "InvalidPlanMetadata":
+      return cause.message;
+    case "ExecutionFailed":
+      return cause.message;
+  }
+}
+
+function renderBundleBuildFailureCause(cause: BundleBuildCause): string {
+  switch (cause._tag) {
+    case "DuplicateOutcome":
+      return `duplicate outcome emitted for ${cause.agentId}`;
+    case "MissingOutcomes":
+      return `missing outcomes for ${cause.agentIds.join(", ")}`;
+    case "UnknownAgent":
+      return `unknown agent ${cause.agentId}`;
+    case "EventOrderViolation":
+      return `event order violated: ${String(cause.previousTs)} before ${String(cause.nextTs)}`;
+    case "SchemaInvalid":
+      return `bundle schema invalid: ${cause.errors.join("; ")}`;
+  }
 }
