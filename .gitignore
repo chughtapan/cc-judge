@@ -11,3 +11,6 @@ eval-results/
 !.stryker-tmp/incremental.json
 reports/
 stryker.log
+.claude
+.codex
+nohup.out
