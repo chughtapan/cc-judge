@@ -9,10 +9,37 @@ import { itEffect, EITHER_LEFT } from "./support/effect.js";
 const SCENARIO_ID_HELLO_WORLD = "hello-world";
 const VALIDATION_CHECK_SAYS_HELLO = "says hello";
 const SCENARIO_IDS_AB = ["scen-a", "scen-b"] as const;
+const TS_SCEN_ID = "ts-scen";
+const MTS_SCEN_ID = "mts-scen";
+const JS_SCEN_ID = "js-scen";
+const MJS_SCEN_ID = "mjs-scen";
+const NO_EXPORTS_MESSAGE_FRAGMENT = "no exports";
+const EXPORT_SHAPE_MESSAGE_FRAGMENT = "must export `default` or `scenario`";
+const DETERMINISTIC_CHECK_MESSAGE_FRAGMENT = "must be functions";
+const UNSUPPORTED_EXT_FRAGMENT = "unsupported extension";
+const LOAD_ERROR_TAG = "LoadError";
 
 function tmpScenarioDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), "cc-judge-scenario-"));
 }
+
+const MINIMAL_TS_SCENARIO_BODY = `{
+  id: "${TS_SCEN_ID}",
+  name: "TS",
+  description: "a ts scenario",
+  setupPrompt: "p",
+  expectedBehavior: "e",
+  validationChecks: ["c"],
+}`;
+
+const YAML_MINIMAL = (id: string) => `
+id: ${id}
+name: ${id}
+description: d
+setupPrompt: p
+expectedBehavior: e
+validationChecks: [c]
+`;
 
 describe("scenarioLoader.loadFromYaml", () => {
   itEffect("decodes a valid YAML scenario", function* () {
@@ -110,5 +137,105 @@ workspace:
       scenarioLoader.loadFromPath("/tmp/cc-judge-nonexistent-*.yaml"),
     );
     expect(result._tag).toBe(EITHER_LEFT);
+  });
+
+  itEffect("fails with FileNotFound on a non-glob non-existent path", function* () {
+    const missing = path.join(os.tmpdir(), `cc-judge-missing-${Date.now()}.yaml`);
+    const result = yield* Effect.either(scenarioLoader.loadFromPath(missing));
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT) {
+      expect(result.left._tag).toBe(LOAD_ERROR_TAG);
+      expect(result.left.cause._tag).toBe("FileNotFound");
+    }
+  });
+
+  itEffect("loads a single YAML file when given an absolute file path (not a directory)", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "single.yaml");
+    writeFileSync(file, YAML_MINIMAL("single-scen"), "utf8");
+    const scenarios = yield* scenarioLoader.loadFromPath(file);
+    expect(scenarios).toHaveLength(1);
+    expect(scenarios[0].id).toBe("single-scen");
+  });
+
+  itEffect("rejects files with unsupported extensions", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "scen.txt");
+    writeFileSync(file, "id: foo", "utf8");
+    const result = yield* Effect.either(scenarioLoader.loadFromPath(file));
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT) {
+      expect(result.left.cause._tag).toBe("ParseFailure");
+      if (result.left.cause._tag === "ParseFailure") {
+        expect(result.left.cause.message).toContain(UNSUPPORTED_EXT_FRAGMENT);
+      }
+    }
+  });
+
+  itEffect("loads a TS scenario via default export", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "scen.ts");
+    writeFileSync(file, `export default ${MINIMAL_TS_SCENARIO_BODY};\n`, "utf8");
+    const scenarios = yield* scenarioLoader.loadFromPath(file);
+    expect(scenarios).toHaveLength(1);
+    expect(scenarios[0].id).toBe(TS_SCEN_ID);
+  });
+
+  itEffect("loads a TS scenario via named `scenario` export", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "named.ts");
+    const body = MINIMAL_TS_SCENARIO_BODY.replace(TS_SCEN_ID, "named-ts-scen");
+    writeFileSync(file, `export const scenario = ${body};\n`, "utf8");
+    const scenarios = yield* scenarioLoader.loadFromPath(file);
+    expect(scenarios).toHaveLength(1);
+    expect(scenarios[0].id).toBe("named-ts-scen");
+  });
+
+  itEffect("carries through function-valued deterministicPassCheck/failCheck fields", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "checks.ts");
+    const body = MINIMAL_TS_SCENARIO_BODY.replace(TS_SCEN_ID, "checks-ts");
+    writeFileSync(
+      file,
+      `export default { ...${body}, deterministicPassCheck: () => true, deterministicFailCheck: () => false };\n`,
+      "utf8",
+    );
+    const scenarios = yield* scenarioLoader.loadFromPath(file);
+    expect(typeof scenarios[0].deterministicPassCheck).toBe("function");
+    expect(typeof scenarios[0].deterministicFailCheck).toBe("function");
+  });
+
+  itEffect("rejects TS module with no exports (empty module)", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "empty.ts");
+    writeFileSync(file, "export {};\n", "utf8");
+    const result = yield* Effect.either(scenarioLoader.loadFromPath(file));
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT && result.left.cause._tag === "ParseFailure") {
+      expect(result.left.cause.message).toContain(EXPORT_SHAPE_MESSAGE_FRAGMENT);
+    }
+  });
+
+  itEffect("rejects TS scenario whose export is not an object", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "str.ts");
+    writeFileSync(file, `export default "not-an-object";\n`, "utf8");
+    const result = yield* Effect.either(scenarioLoader.loadFromPath(file));
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT && result.left.cause._tag === "ParseFailure") {
+      expect(result.left.cause.message).toContain("not an object");
+    }
+  });
+
+  itEffect("rejects TS scenario with non-function deterministicPassCheck", function* () {
+    const dir = tmpScenarioDir();
+    const file = path.join(dir, "bad-check.ts");
+    const body = MINIMAL_TS_SCENARIO_BODY.replace(TS_SCEN_ID, "bad-check");
+    writeFileSync(file, `export default { ...${body}, deterministicPassCheck: 42 };\n`, "utf8");
+    const result = yield* Effect.either(scenarioLoader.loadFromPath(file));
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT && result.left.cause._tag === "SchemaInvalid") {
+      expect(result.left.cause.errors.join(" ")).toContain(DETERMINISTIC_CHECK_MESSAGE_FRAGMENT);
+    }
   });
 });
