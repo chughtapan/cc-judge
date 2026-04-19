@@ -12,6 +12,11 @@ import { TraceId, ScenarioId, type Turn } from "../core/types.js";
 
 export type TraceFormat = "canonical" | "otel";
 
+export const TRACE_FORMAT = {
+  Canonical: "canonical",
+  Otel: "otel",
+} as const satisfies { readonly [K in Capitalize<TraceFormat>]: Uncapitalize<K> };
+
 export interface TraceAdapter {
   readonly format: TraceFormat;
   decode(source: string, originPath: string): Effect.Effect<Trace, TraceDecodeError, never>;
@@ -68,7 +73,7 @@ function decodeCanonical(source: string, originPath: string): Effect.Effect<Trac
 }
 
 export const canonicalTraceAdapter: TraceAdapter = {
-  format: "canonical",
+  format: TRACE_FORMAT.Canonical,
   decode: decodeCanonical,
 };
 
@@ -216,15 +221,15 @@ function decodeOtel(source: string, originPath: string): Effect.Effect<Trace, Tr
 }
 
 export const otelTraceAdapter: TraceAdapter = {
-  format: "otel",
+  format: TRACE_FORMAT.Otel,
   decode: decodeOtel,
 };
 
 export function getTraceAdapter(format: TraceFormat): TraceAdapter {
   switch (format) {
-    case "canonical":
+    case TRACE_FORMAT.Canonical:
       return canonicalTraceAdapter;
-    case "otel":
+    case TRACE_FORMAT.Otel:
       return otelTraceAdapter;
   }
 }

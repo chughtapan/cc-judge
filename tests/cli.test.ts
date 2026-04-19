@@ -1,9 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect } from "vitest";
 import { Effect } from "effect";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { runCommand, type RunCliArgs } from "../src/app/cli.js";
+import { itEffect } from "./support/effect.js";
+
+const EXIT_RUNNER_RESOLUTION = 2;
 
 function tmpScenarioDir(): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-cli-"));
@@ -34,16 +37,16 @@ function baseArgs(scenarioDir: string): RunCliArgs {
 }
 
 describe("runCommand runner-resolution failure", () => {
-  it("exits 2 when runtime=docker but --image is missing", async () => {
+  itEffect("exits 2 when runtime=docker but --image is missing", function* () {
     const dir = tmpScenarioDir();
-    const code = await Effect.runPromise(runCommand(baseArgs(dir)));
-    expect(code).toBe(2);
+    const code = yield* runCommand(baseArgs(dir));
+    expect(code).toBe(EXIT_RUNNER_RESOLUTION);
   });
 
-  it("exits 2 when runtime=subprocess but --bin is missing", async () => {
+  itEffect("exits 2 when runtime=subprocess but --bin is missing", function* () {
     const dir = tmpScenarioDir();
     const args: RunCliArgs = { ...baseArgs(dir), runtime: "subprocess" };
-    const code = await Effect.runPromise(runCommand(args));
-    expect(code).toBe(2);
+    const code = yield* runCommand(args);
+    expect(code).toBe(EXIT_RUNNER_RESOLUTION);
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect } from "vitest";
 import { Effect } from "effect";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import * as path from "node:path";
@@ -6,6 +6,15 @@ import * as os from "node:os";
 import { makeReportEmitter, readRunsJsonl } from "../src/emit/report.js";
 import { ScenarioId, RunNumber } from "../src/core/types.js";
 import type { RunRecord, Report } from "../src/core/schema.js";
+import { itEffect } from "./support/effect.js";
+
+const SCEN_A_ID = "scen-a";
+const SCEN_B_ID = "scen-b";
+const SCEN_C_ID = "scen-c";
+const SCEN_C_RUN_NUMBER = 2;
+const EXPECTED_RESULTS_LINE_COUNT = 2;
+const EXPECTED_ROUNDTRIP_LENGTH = 1;
+const SUMMARY_PASSED_LINE = "passed: 1";
 
 function makeRecord(id: string, run: number, pass: boolean): RunRecord {
   return {
@@ -33,43 +42,41 @@ function makeRecord(id: string, run: number, pass: boolean): RunRecord {
 }
 
 describe("ReportEmitter", () => {
-  it("writes results.jsonl + summary.md + details/*.yaml", async () => {
+  itEffect("writes results.jsonl + summary.md + details/*.yaml", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-emit-"));
     const emitter = makeReportEmitter({ resultsDir: dir });
-    const r1 = makeRecord("scen-a", 1, true);
-    const r2 = makeRecord("scen-b", 1, false);
-    await Effect.runPromise(emitter.emitRun(r1));
-    await Effect.runPromise(emitter.emitRun(r2));
+    const r1 = makeRecord(SCEN_A_ID, 1, true);
+    const r2 = makeRecord(SCEN_B_ID, 1, false);
+    yield* emitter.emitRun(r1);
+    yield* emitter.emitRun(r2);
     const report: Report = {
       runs: [r1, r2],
       summary: { total: 2, passed: 1, failed: 1, avgLatencyMs: 1234 },
       artifactsDir: dir,
     };
-    await Effect.runPromise(emitter.emitReport(report));
+    yield* emitter.emitReport(report);
     expect(existsSync(path.join(dir, "summary.md"))).toBe(true);
     expect(existsSync(path.join(dir, "results.jsonl"))).toBe(true);
-    expect(existsSync(path.join(dir, "details", "scen-a.1.yaml"))).toBe(true);
-    expect(existsSync(path.join(dir, "details", "scen-b.1.yaml"))).toBe(true);
+    expect(existsSync(path.join(dir, "details", `${SCEN_A_ID}.1.yaml`))).toBe(true);
+    expect(existsSync(path.join(dir, "details", `${SCEN_B_ID}.1.yaml`))).toBe(true);
     const summary = readFileSync(path.join(dir, "summary.md"), "utf8");
-    expect(summary).toContain("passed: 1");
-    expect(summary).toContain("scen-b");
+    expect(summary).toContain(SUMMARY_PASSED_LINE);
+    expect(summary).toContain(SCEN_B_ID);
     const jsonl = readFileSync(path.join(dir, "results.jsonl"), "utf8").trim();
-    expect(jsonl.split("\n").length).toBe(2);
+    expect(jsonl.split("\n").length).toBe(EXPECTED_RESULTS_LINE_COUNT);
   });
 
-  it("readRunsJsonl round-trips", async () => {
+  itEffect("readRunsJsonl round-trips", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-emit-"));
     const emitter = makeReportEmitter({ resultsDir: dir });
-    const r = makeRecord("scen-c", 2, true);
-    await Effect.runPromise(
-      emitter.emitReport({
-        runs: [r],
-        summary: { total: 1, passed: 1, failed: 0, avgLatencyMs: 1234 },
-      }),
-    );
+    const r = makeRecord(SCEN_C_ID, SCEN_C_RUN_NUMBER, true);
+    yield* emitter.emitReport({
+      runs: [r],
+      summary: { total: 1, passed: 1, failed: 0, avgLatencyMs: 1234 },
+    });
     const round = readRunsJsonl(dir);
-    expect(round.length).toBe(1);
-    expect(round[0]?.scenarioId).toBe("scen-c");
-    expect(round[0]?.runNumber).toBe(2);
+    expect(round.length).toBe(EXPECTED_ROUNDTRIP_LENGTH);
+    expect(round[0]?.scenarioId).toBe(SCEN_C_ID);
+    expect(round[0]?.runNumber).toBe(SCEN_C_RUN_NUMBER);
   });
 });

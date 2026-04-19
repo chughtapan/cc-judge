@@ -21,11 +21,27 @@ export function scenarioIdFromTraceId(t: TraceId): ScenarioId {
 
 export type IssueSeverity = "minor" | "significant" | "critical";
 
+export const ISSUE_SEVERITY = {
+  Minor: "minor",
+  Significant: "significant",
+  Critical: "critical",
+} as const satisfies { readonly [K in Capitalize<IssueSeverity>]: Uncapitalize<K> };
+
 export type RunSource = "scenario" | "trace";
+
+export const RUN_SOURCE = {
+  Scenario: "scenario",
+  Trace: "trace",
+} as const satisfies { readonly [K in Capitalize<RunSource>]: Uncapitalize<K> };
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export type RuntimeKind = "docker" | "subprocess";
+
+export const RUNTIME_KIND = {
+  Docker: "docker",
+  Subprocess: "subprocess",
+} as const satisfies { readonly [K in Capitalize<RuntimeKind>]: Uncapitalize<K> };
 
 export interface Issue {
   readonly issue: string;

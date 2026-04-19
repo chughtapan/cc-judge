@@ -3,10 +3,15 @@ import { execSync } from "node:child_process";
 import { Effect } from "effect";
 import { GenericContainer } from "testcontainers";
 import { DockerRunner } from "../../src/runner/index.js";
-import { ScenarioId } from "../../src/core/types.js";
+import { ScenarioId, RUNTIME_KIND } from "../../src/core/types.js";
 import type { Scenario } from "../../src/core/schema.js";
+import { itEffect } from "../support/effect.js";
 
 const IMAGE = "alpine:3.19";
+const CONTAINER_RUNNING = "true";
+const INTEGRATION_TIMEOUT_MS = 60_000;
+const WARM_STARTUP_TIMEOUT_MS = 60_000;
+const WARM_TOTAL_TIMEOUT_MS = 180_000;
 
 function dockerAvailable(): boolean {
   try {
@@ -29,22 +34,36 @@ const scenario: Scenario = {
 };
 
 describe.skipIf(!dockerAvailable())("DockerRunner integration (real Docker)", () => {
-  beforeAll(async () => {
-    const warm = await new GenericContainer(IMAGE)
-      .withCommand(["tail", "-f", "/dev/null"])
-      .withStartupTimeout(60_000)
-      .start();
-    await warm.stop();
-  }, 180_000);
+  beforeAll(
+    () =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const warm = yield* Effect.promise(() =>
+            new GenericContainer(IMAGE)
+              .withCommand(["tail", "-f", "/dev/null"])
+              .withStartupTimeout(WARM_STARTUP_TIMEOUT_MS)
+              .start(),
+          );
+          yield* Effect.promise(() => warm.stop());
+        }),
+      ),
+    WARM_TOTAL_TIMEOUT_MS,
+  );
 
-  it("start() yields a running container; stop() tears it down", async () => {
-    const runner = new DockerRunner({ image: IMAGE });
-    const handle = await Effect.runPromise(runner.start(scenario));
-    expect(handle.kind).toBe("docker");
-    expect(handle.containerId).toBeTruthy();
-    const cid = handle.containerId ?? "";
-    const running = execSync(`docker inspect -f '{{.State.Running}}' ${cid}`).toString().trim();
-    expect(running).toBe("true");
-    await Effect.runPromise(runner.stop(handle));
-  }, 60_000);
+  itEffect(
+    "start() yields a running container; stop() tears it down",
+    function* () {
+      const runner = new DockerRunner({ image: IMAGE });
+      const handle = yield* runner.start(scenario);
+      expect(handle.kind).toBe(RUNTIME_KIND.Docker);
+      expect(handle.containerId).toBeTruthy();
+      const cid = handle.containerId ?? "";
+      const running = execSync(`docker inspect -f '{{.State.Running}}' ${cid}`)
+        .toString()
+        .trim();
+      expect(running).toBe(CONTAINER_RUNNING);
+      yield* runner.stop(handle);
+    },
+    INTEGRATION_TIMEOUT_MS,
+  );
 });

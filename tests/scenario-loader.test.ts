@@ -1,16 +1,21 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect } from "vitest";
 import { Effect } from "effect";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { scenarioLoader } from "../src/core/scenario.js";
+import { itEffect, EITHER_LEFT } from "./support/effect.js";
+
+const SCENARIO_ID_HELLO_WORLD = "hello-world";
+const VALIDATION_CHECK_SAYS_HELLO = "says hello";
+const SCENARIO_IDS_AB = ["scen-a", "scen-b"] as const;
 
 function tmpScenarioDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), "cc-judge-scenario-"));
 }
 
 describe("scenarioLoader.loadFromYaml", () => {
-  it("decodes a valid YAML scenario", async () => {
+  itEffect("decodes a valid YAML scenario", function* () {
     const yaml = `
 id: hello-world
 name: Hello World
@@ -20,22 +25,20 @@ expectedBehavior: The agent responds with a greeting
 validationChecks:
   - says hello
 `;
-    const scenario = await Effect.runPromise(scenarioLoader.loadFromYaml(yaml, "mem://hello"));
-    expect(scenario.id).toBe("hello-world");
-    expect(scenario.validationChecks).toEqual(["says hello"]);
+    const scenario = yield* scenarioLoader.loadFromYaml(yaml, "mem://hello");
+    expect(scenario.id).toBe(SCENARIO_ID_HELLO_WORLD);
+    expect(scenario.validationChecks).toEqual([VALIDATION_CHECK_SAYS_HELLO]);
   });
 
-  it("rejects YAML missing required fields", async () => {
+  itEffect("rejects YAML missing required fields", function* () {
     const yaml = "id: foo\nname: Foo\n";
-    const result = await Effect.runPromise(
-      Effect.either(scenarioLoader.loadFromYaml(yaml, "mem://bad")),
-    );
-    expect(result._tag).toBe("Left");
+    const result = yield* Effect.either(scenarioLoader.loadFromYaml(yaml, "mem://bad"));
+    expect(result._tag).toBe(EITHER_LEFT);
   });
 });
 
 describe("scenarioLoader.loadFromPath", () => {
-  it("loads a directory of YAML scenarios and enforces unique ids", async () => {
+  itEffect("loads a directory of YAML scenarios and enforces unique ids", function* () {
     const dir = tmpScenarioDir();
     const a = `
 id: scen-a
@@ -57,11 +60,11 @@ validationChecks:
 `;
     writeFileSync(path.join(dir, "a.yaml"), a, "utf8");
     writeFileSync(path.join(dir, "b.yaml"), b, "utf8");
-    const scenarios = await Effect.runPromise(scenarioLoader.loadFromPath(dir));
-    expect(scenarios.map((s) => s.id).sort()).toEqual(["scen-a", "scen-b"]);
+    const scenarios = yield* scenarioLoader.loadFromPath(dir);
+    expect(scenarios.map((s) => s.id).sort()).toEqual([...SCENARIO_IDS_AB]);
   });
 
-  it("rejects duplicate scenario ids across files", async () => {
+  itEffect("rejects duplicate scenario ids across files", function* () {
     const dir = tmpScenarioDir();
     const yaml = `
 id: dup
@@ -74,11 +77,11 @@ validationChecks: [c]
     mkdirSync(path.join(dir, "sub"), { recursive: true });
     writeFileSync(path.join(dir, "a.yaml"), yaml, "utf8");
     writeFileSync(path.join(dir, "sub", "b.yaml"), yaml, "utf8");
-    const result = await Effect.runPromise(Effect.either(scenarioLoader.loadFromPath(dir)));
-    expect(result._tag).toBe("Left");
+    const result = yield* Effect.either(scenarioLoader.loadFromPath(dir));
+    expect(result._tag).toBe(EITHER_LEFT);
   });
 
-  it("rejects workspace paths that are absolute or contain .. segments", async () => {
+  itEffect("rejects workspace paths that are absolute or contain .. segments", function* () {
     const cases = [
       "/etc/passwd",
       "../../etc/passwd",
@@ -97,17 +100,15 @@ workspace:
   - path: ${JSON.stringify(badPath)}
     content: "x"
 `;
-      const result = await Effect.runPromise(
-        Effect.either(scenarioLoader.loadFromYaml(yaml, "mem://wp")),
-      );
-      expect(result._tag, `expected Left for ${badPath}`).toBe("Left");
+      const result = yield* Effect.either(scenarioLoader.loadFromYaml(yaml, "mem://wp"));
+      expect(result._tag, `expected Left for ${badPath}`).toBe(EITHER_LEFT);
     }
   });
 
-  it("fails with GlobNoMatches on an empty pattern", async () => {
-    const result = await Effect.runPromise(
-      Effect.either(scenarioLoader.loadFromPath("/tmp/cc-judge-nonexistent-*.yaml")),
+  itEffect("fails with GlobNoMatches on an empty pattern", function* () {
+    const result = yield* Effect.either(
+      scenarioLoader.loadFromPath("/tmp/cc-judge-nonexistent-*.yaml"),
     );
-    expect(result._tag).toBe("Left");
+    expect(result._tag).toBe(EITHER_LEFT);
   });
 });

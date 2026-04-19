@@ -62,3 +62,28 @@ export class RunnerResolutionError extends Data.TaggedError("RunnerResolutionErr
 export type RunnerResolutionCause =
   | { readonly _tag: "NoRunnerConfigured" }
   | { readonly _tag: "InvalidRuntime"; readonly value: string };
+
+// Tag constants. Identity-mapped objects over the `_tag` union members;
+// the mapped-type `satisfies` forces value == key at the type level, so a
+// silent rename of a cause variant breaks compilation here.
+
+export const ERROR_TAG = {
+  AgentStartError: "AgentStartError",
+  AgentRunTimeoutError: "AgentRunTimeoutError",
+} as const;
+
+export const LOAD_ERROR_CAUSE = {
+  FileNotFound: "FileNotFound",
+  GlobNoMatches: "GlobNoMatches",
+  ParseFailure: "ParseFailure",
+  SchemaInvalid: "SchemaInvalid",
+  DuplicateId: "DuplicateId",
+} as const satisfies { readonly [K in LoadErrorCause["_tag"]]: K };
+
+export const AGENT_START_CAUSE = {
+  ImageMissing: "ImageMissing",
+  ContainerStartFailed: "ContainerStartFailed",
+  BinaryNotFound: "BinaryNotFound",
+  WorkspacePathEscape: "WorkspacePathEscape",
+  WorkspaceSetupFailed: "WorkspaceSetupFailed",
+} as const satisfies { readonly [K in AgentStartErrorCause["_tag"]]: K };
