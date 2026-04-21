@@ -23,6 +23,9 @@ importers:
       glob:
         specifier: 11.0.0
         version: 11.0.0
+      proper-lockfile:
+        specifier: 4.1.2
+        version: 4.1.2
       yaml:
         specifier: 2.6.1
         version: 2.6.1
@@ -42,6 +45,9 @@ importers:
       '@types/node':
         specifier: 22.10.5
         version: 22.10.5
+      '@types/proper-lockfile':
+        specifier: 4.1.4
+        version: 4.1.4
       '@types/yargs':
         specifier: 17.0.33
         version: 17.0.33
@@ -1145,6 +1151,12 @@ packages:
 
   '@types/node@22.10.5':
     resolution: {integrity: sha512-F8Q+SeGimwOo86fiovQh8qiXfFEh2/ocYv7tU5pJ3EXMSSxk1Joj5wefpFK2fHTf/N6HKGSxIDBT9f3gCxXPkQ==}
+
+  '@types/proper-lockfile@4.1.4':
+    resolution: {integrity: sha512-uo2ABllncSqg9F1D4nugVl9v93RmjxF6LJzQLMLDdPaXCUIDPeOJ21Gbqi43xNKzBi/WQ0Q0dICqufzQbMjipQ==}
+
+  '@types/retry@0.12.5':
+    resolution: {integrity: sha512-3xSjTp3v03X/lSQLkczaN9UIEwJMoMCA1+Nb5HfbJEQWogdeQIyVtTvxPXDQjZ5zws8rFQfVfRdz03ARihPJgw==}
 
   '@types/ssh2-streams@0.1.13':
     resolution: {integrity: sha512-faHyY3brO9oLEA0QlcO8N2wT7R0+1sHWZvQ+y3rMLwdY1ZyS1z0W3t65j9PqT4HmQ6ALzNe7RZlNuCNE0wBSWA==}
@@ -3738,6 +3750,12 @@ snapshots:
   '@types/node@22.10.5':
     dependencies:
       undici-types: 6.20.0
+
+  '@types/proper-lockfile@4.1.4':
+    dependencies:
+      '@types/retry': 0.12.5
+
+  '@types/retry@0.12.5': {}
 
   '@types/ssh2-streams@0.1.13':
     dependencies:
