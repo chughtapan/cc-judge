@@ -1,4 +1,4 @@
-// CLI entrypoints: `cc-judge run` and `cc-judge score`.
+// CLI entrypoints: `cc-judge run`, `cc-judge score`, and `cc-judge inspect`.
 // Built on yargs. Exit codes: 0 all-pass, 1 any-fail, 2 fatal.
 
 import { Effect } from "effect";
@@ -16,6 +16,8 @@ import { getTraceAdapter, type TraceFormat } from "../emit/trace-adapter.js";
 import { glob as doGlob } from "glob";
 import { RunnerResolutionError } from "../core/errors.js";
 import { runScenarios, scoreTraces } from "./pipeline.js";
+import { inspectRun, type InspectErrorCause } from "./inspect.js";
+import { absurd } from "../core/types.js";
 
 export type CliExitCode = 0 | 1 | 2;
 
@@ -264,6 +266,45 @@ export function parseScoreArgs(raw: unknown): ScoreCliArgs {
   };
 }
 
+// ---------------------------------------------------------------------------
+// inspect subcommand — `cc-judge inspect <runId>`.
+// ---------------------------------------------------------------------------
+
+export interface InspectCliArgs {
+  readonly runId: string;
+  readonly results: string;
+}
+
+export function parseInspectArgs(raw: unknown): InspectCliArgs {
+  const r = asObject(raw);
+  return {
+    runId: typeof r["runId"] === "string" ? r["runId"] : "",
+    results: typeof r["results"] === "string" ? r["results"] : "./eval-results",
+  };
+}
+
+export function inspectCommand(args: InspectCliArgs): Effect.Effect<CliExitCode, never, never> {
+  return Effect.gen(function* () {
+    const result = yield* Effect.either(inspectRun(args.runId, args.results));
+    if (result._tag === "Left") {
+      const cause: InspectErrorCause = result.left.cause;
+      switch (cause._tag) {
+        case "RunNotFound":
+          process.stderr.write(`cc-judge: inspect: run not found: ${cause.runId}\n`);
+          return 2 as CliExitCode;
+        case "DuplicateSeq":
+          process.stderr.write(
+            `cc-judge: inspect: duplicate seq ${String(cause.seq)} in run ${cause.runId}\n`,
+          );
+          return 2 as CliExitCode;
+        default:
+          return absurd(cause);
+      }
+    }
+    return 0 as CliExitCode;
+  });
+}
+
 export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, never, never> {
   return Effect.suspend(() => {
     const parsed = yargs(argv.slice())
@@ -303,6 +344,11 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
           .option("emit-braintrust", { type: "boolean", default: false })
           .option("emit-promptfoo", { type: "string" }),
       )
+      .command("inspect <runId>", "Inspect a run's WAL timeline", (y) =>
+        y
+          .positional("runId", { type: "string", demandOption: true })
+          .option("results", { type: "string", default: "./eval-results" }),
+      )
       .demandCommand(1)
       .strict()
       .help()
@@ -314,6 +360,8 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
         return runCommand(parseRunArgs(parsed));
       case "score":
         return scoreCommand(parseScoreArgs(parsed));
+      case "inspect":
+        return inspectCommand(parseInspectArgs(parsed));
       default:
         process.stderr.write(`cc-judge: unknown command\n`);
         return Effect.succeed(2 as CliExitCode);
