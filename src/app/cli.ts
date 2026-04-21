@@ -36,6 +36,7 @@ export interface RunCliArgs {
   readonly totalTimeoutMs?: number;
   readonly emitBraintrust: boolean;
   readonly emitPromptfoo?: string;
+  readonly streamEvents: boolean;
 }
 
 export interface ScoreCliArgs {
@@ -116,6 +117,7 @@ export function runCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, 
         concurrency: args.concurrency,
         emitters,
         logLevel: args.logLevel,
+        streamEvents: args.streamEvents,
         ...(args.scenarioIds !== undefined ? { scenarioIdFilter: args.scenarioIds } : {}),
         ...(args.githubComment !== undefined ? { githubComment: args.githubComment } : {}),
         ...(args.githubCommentArtifactUrl !== undefined
@@ -236,6 +238,7 @@ export function parseRunArgs(raw: unknown): RunCliArgs {
     ...(typeof r["totalTimeoutMs"] === "number" ? { totalTimeoutMs: r["totalTimeoutMs"] } : {}),
     emitBraintrust: r["emitBraintrust"] === true,
     ...(typeof r["emitPromptfoo"] === "string" ? { emitPromptfoo: r["emitPromptfoo"] } : {}),
+    streamEvents: r["streamEvents"] === true,
   };
 }
 
@@ -285,7 +288,8 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
           .option("log-level", { choices: ["debug", "info", "warn", "error"] as const, default: "info" })
           .option("total-timeout-ms", { type: "number" })
           .option("emit-braintrust", { type: "boolean", default: false })
-          .option("emit-promptfoo", { type: "string" }),
+          .option("emit-promptfoo", { type: "string" })
+          .option("stream-events", { type: "boolean", default: false }),
       )
       .command("score <traces>", "Score traces", (y) =>
         y

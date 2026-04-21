@@ -25,6 +25,7 @@ export interface RunOpts extends SharedOpts {
   readonly runtime?: AgentRuntime;
   readonly coordinator?: RunCoordinator;
   readonly scenarioIdFilter?: ReadonlyArray<string>;
+  readonly streamEvents?: boolean;
 }
 
 export interface ScoreOpts extends SharedOpts {
@@ -34,6 +35,10 @@ export interface ScoreOpts extends SharedOpts {
 export interface HarnessRunOpts extends SharedOpts {
   readonly runtime?: AgentRuntime;
   readonly coordinator?: RunCoordinator;
+  // Enable the WAL substrate (design doc § "Recommended Approach step 2").
+  // Defaults to `true` when a `resultsDir` is available. Tests or callers
+  // that do not want side-effect directory creation can pass `false`.
+  readonly wal?: boolean;
 }
 
 export interface PlannedRunInput {
