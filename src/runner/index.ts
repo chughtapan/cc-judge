@@ -295,7 +295,6 @@ export class SubprocessRunner implements AgentRunner {
   ): Effect.Effect<Turn, AgentRunTimeoutError, never> {
     const turnIndex = handle.turnsExecuted.count;
     const startedAt = new Date().toISOString();
-    const logsStartTime = new Date().toISOString();
     const startMs = Date.now();
     const args = [...(this.#opts.extraArgs ?? DEFAULT_CLAUDE_ARGS), prompt];
     const cwd = this.#opts.cwd ?? handle.workspaceDir;
