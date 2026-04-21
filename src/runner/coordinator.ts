@@ -65,6 +65,7 @@ export interface RunCoordinator {
 export interface RunCoordinatorOpts {
   readonly abortSignal?: AbortSignal;
   readonly runId?: string;
+  readonly streamEvents?: boolean;
 }
 
 export interface PromptWorkspaceHarnessConfig {
@@ -86,7 +87,7 @@ export class DefaultRunCoordinator implements RunCoordinator {
     opts: RunCoordinatorOpts = {},
   ): Effect.Effect<JudgmentBundle, RunCoordinationError, never> {
     const runId = RunId(opts.runId ?? randomUUID());
-    const sink = makeNormalizedBundleSink(plan, runId);
+    const sink = makeNormalizedBundleSink(plan, runId, opts.streamEvents);
     const handles: RuntimeHandle[] = [];
     const harnessOpts = opts.abortSignal !== undefined ? { abortSignal: opts.abortSignal } : {};
 
@@ -169,6 +170,7 @@ export class PromptWorkspaceHarness implements ExecutionHarness {
 export function makeNormalizedBundleSink(
   plan: RunPlan,
   runId: string,
+  streamEvents?: boolean,
 ): NormalizedBundleSink {
   const turns: AgentTurn[] = [];
   const events: TraceEvent[] = [];
@@ -189,18 +191,33 @@ export function makeNormalizedBundleSink(
             },
           });
         }
+        if (streamEvents === true) {
+          try {
+            process.stderr.write(`[turn] ${JSON.stringify(turn)}\n`);
+          } catch (err) { void err; }
+        }
         turns.push(turn);
       }).pipe(Effect.catchAll(asBundleBuildError));
     },
 
     recordEvent(event) {
       return Effect.sync(() => {
+        if (streamEvents === true) {
+          try {
+            process.stderr.write(`[event] ${JSON.stringify(event)}\n`);
+          } catch (err) { void err; }
+        }
         events.push(event);
       }).pipe(Effect.catchAll(asBundleBuildError));
     },
 
     recordPhase(phase) {
       return Effect.sync(() => {
+        if (streamEvents === true) {
+          try {
+            process.stderr.write(`[phase] ${JSON.stringify(phase)}\n`);
+          } catch (err) { void err; }
+        }
         phases.push(phase);
       }).pipe(Effect.catchAll(asBundleBuildError));
     },
