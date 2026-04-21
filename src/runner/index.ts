@@ -6,7 +6,8 @@ export * from "./coordinator.js";
 
 import { Effect } from "effect";
 import { execSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, appendFileSync, renameSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -25,6 +26,25 @@ import {
 } from "../core/types.js";
 import type { Scenario } from "../core/schema.js";
 
+// Minimal interface for the docker-logs-follow child so tests can substitute
+// a FakeChildProcess without importing the full ChildProcess type.
+export interface KillableProcess {
+  kill(signal?: string): boolean;
+}
+
+// Structured warning emitter for log-capture failures (invariant #12).
+// All docker log capture filesystem/spawn errors are emitted here and never
+// propagate to the caller — they must never affect the verdict or exit code.
+export const DOCKER_LOG_WARN_SOURCE = "cc-judge:docker-log-capture";
+
+function dockerLogWarn(event: string, detail: Readonly<Record<string, unknown>>): void {
+  try {
+    process.stderr.write(
+      `${JSON.stringify({ level: "warn", source: DOCKER_LOG_WARN_SOURCE, event, ts: Date.now(), ...detail })}\n`,
+    );
+  } catch (err) { void err; }
+}
+
 export interface AgentHandle {
   readonly __brand: "AgentHandle";
   readonly kind: RuntimeKind;
@@ -33,6 +53,11 @@ export interface AgentHandle {
   readonly containerId?: string;
   readonly initialFiles: ReadonlyMap<string, string>;
   readonly turnsExecuted: { count: number };
+  // Set by DockerRunner.start() when logCapture is configured (#88a).
+  // Carries the per-run log ID and the docker-logs-follow child so stop()
+  // can kill the child and rename the log file (acceptance #88c, #88e).
+  readonly dockerLogRunId?: string;
+  readonly dockerLogsChild?: KillableProcess;
 }
 
 export interface AgentRunner {
@@ -406,6 +431,94 @@ export interface DockerRunnerOpts {
   readonly network?: "none" | "bridge";
   readonly memoryMb?: number;
   readonly cpus?: number;
+  // When set, DockerRunner.start() spawns a `docker logs --follow <cid>` child
+  // that tees container stdout+stderr to results/inflight/<runId>/docker-<agentId>.log.
+  // stop() kills the child and atomically renames the log into results/runs/<runId>/.
+  // Log-capture failures emit a structured warning to stderr and never affect the
+  // verdict or exit code (invariant #12).
+  readonly logCapture?: {
+    readonly resultsDir: string;
+  };
+}
+
+// Per-run log-capture state returned by startDockerLogCapture().
+// Always returns {} when logCapture is unset or setup fails (invariant #12).
+interface DockerLogCapture {
+  readonly dockerLogRunId?: string;
+  readonly dockerLogsChild?: KillableProcess;
+}
+
+function dockerLogPaths(resultsDir: string, runId: string, scenarioId: ScenarioId): {
+  readonly inflight: string;
+  readonly runsDir: string;
+  readonly runs: string;
+} {
+  const fileName = `docker-${String(scenarioId)}.log`;
+  return {
+    inflight: path.join(resultsDir, "inflight", runId, fileName),
+    runsDir: path.join(resultsDir, "runs", runId),
+    runs: path.join(resultsDir, "runs", runId, fileName),
+  };
+}
+
+// Spawn a `docker logs --follow <cid>` child that tees container stdout+stderr
+// to an inflight log file. All failures (mkdir/write/spawn) are swallowed and
+// emitted as structured warnings (invariant #12) — never propagate to caller.
+function startDockerLogCapture(
+  capture: DockerRunnerOpts["logCapture"],
+  cid: string,
+  scenarioId: ScenarioId,
+): DockerLogCapture {
+  if (capture === undefined) return {};
+  try {
+    const runId = randomUUID();
+    const { inflight: logPath } = dockerLogPaths(capture.resultsDir, runId, scenarioId);
+    mkdirSync(path.dirname(logPath), { recursive: true });
+    // Touch the file synchronously so the path is discoverable immediately
+    // (acceptance #88d: predictable path exists as soon as start() returns).
+    writeFileSync(logPath, "");
+    const logsChild: ChildProcess = spawn("docker", ["logs", "--follow", cid], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    // appendFileSync (not a WriteStream) ensures each chunk is durably written
+    // before the next data event fires — avoids stream-open race in tests (#88b).
+    const teeChunk = (chunk: Buffer): void => {
+      try { appendFileSync(logPath, chunk); } catch (err) { void err; }
+    };
+    logsChild.stdout?.on("data", teeChunk);
+    logsChild.stderr?.on("data", teeChunk);
+    logsChild.on("error", (err: Error) => {
+      dockerLogWarn("logs.child.error", { cid, runId, error: err.message });
+    });
+    return { dockerLogRunId: runId, dockerLogsChild: logsChild };
+  } catch (err) {
+    dockerLogWarn("logs.start.failed", {
+      scenarioId: String(scenarioId),
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {};
+  }
+}
+
+// Atomically move the inflight log into results/runs/<runId>/ on clean stop
+// (acceptance #88c). Rename failures emit a warning; never throw (invariant #12).
+function finalizeDockerLogCapture(
+  capture: DockerRunnerOpts["logCapture"],
+  runId: string | undefined,
+  scenarioId: ScenarioId,
+): void {
+  if (capture === undefined || runId === undefined) return;
+  const paths = dockerLogPaths(capture.resultsDir, runId, scenarioId);
+  try {
+    mkdirSync(paths.runsDir, { recursive: true });
+    renameSync(paths.inflight, paths.runs);
+  } catch (err) {
+    dockerLogWarn("log.rename.failed", {
+      from: paths.inflight,
+      to: paths.runs,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 export class DockerRunner implements AgentRunner {
@@ -452,6 +565,11 @@ export class DockerRunner implements AgentRunner {
                 .toString("utf8")
                 .trim();
               execSync(`docker start ${shellQuote(cid)}`, { stdio: "ignore" });
+
+              // Permanent log capture (#88a-#88d). Failures are emitted as
+              // warnings and MUST NOT affect the returned handle (invariant #12).
+              const logCap = startDockerLogCapture(this.#opts.logCapture, cid, scenario.id);
+
               return {
                 __brand: "AgentHandle",
                 kind: "docker",
@@ -460,6 +578,8 @@ export class DockerRunner implements AgentRunner {
                 containerId: cid,
                 initialFiles,
                 turnsExecuted: { count: 0 },
+                ...(logCap.dockerLogRunId !== undefined ? { dockerLogRunId: logCap.dockerLogRunId } : {}),
+                ...(logCap.dockerLogsChild !== undefined ? { dockerLogsChild: logCap.dockerLogsChild } : {}),
               };
             },
             catch: (err): AgentStartError =>
@@ -570,6 +690,10 @@ export class DockerRunner implements AgentRunner {
 
   stop(handle: AgentHandle): Effect.Effect<void, never, never> {
     return Effect.sync(() => {
+      // Kill docker-logs-follow child first to prevent zombie processes (#88e).
+      if (handle.dockerLogsChild !== undefined) {
+        try { handle.dockerLogsChild.kill("SIGTERM"); } catch (err) { void err; }
+      }
       const cid = handle.containerId;
       if (cid !== undefined && cid.length > 0) {
         try {
@@ -588,6 +712,8 @@ export class DockerRunner implements AgentRunner {
       } catch (err) { void err;
         // Filesystem cleanup best-effort; invariant #7 forbids propagation.
       }
+      // Atomic rename of docker log inflight → runs (#88c, invariant #12).
+      finalizeDockerLogCapture(this.#opts.logCapture, handle.dockerLogRunId, handle.scenarioId);
     });
   }
 }
