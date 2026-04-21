@@ -6,7 +6,7 @@ export * from "./coordinator.js";
 
 import { Effect } from "effect";
 import { execSync, spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, appendFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -41,7 +41,7 @@ export interface AgentRunner {
   turn(
     handle: AgentHandle,
     prompt: string,
-    opts: { readonly timeoutMs: number },
+    opts: { readonly timeoutMs: number; readonly runId?: string; readonly resultsDir?: string },
   ): Effect.Effect<Turn, AgentRunTimeoutError, never>;
   diff(handle: AgentHandle): Effect.Effect<WorkspaceDiff, never, never>;
   stop(handle: AgentHandle): Effect.Effect<void, never, never>;
@@ -291,7 +291,7 @@ export class SubprocessRunner implements AgentRunner {
   turn(
     handle: AgentHandle,
     prompt: string,
-    opts: { readonly timeoutMs: number },
+    opts: { readonly timeoutMs: number; readonly runId?: string; readonly resultsDir?: string },
   ): Effect.Effect<Turn, AgentRunTimeoutError, never> {
     const turnIndex = handle.turnsExecuted.count;
     const startedAt = new Date().toISOString();
@@ -479,10 +479,11 @@ export class DockerRunner implements AgentRunner {
   turn(
     handle: AgentHandle,
     prompt: string,
-    opts: { readonly timeoutMs: number },
+    opts: { readonly timeoutMs: number; readonly runId?: string; readonly resultsDir?: string },
   ): Effect.Effect<Turn, AgentRunTimeoutError, never> {
     const turnIndex = handle.turnsExecuted.count;
     const startedAt = new Date().toISOString();
+    const logsStartTime = new Date().toISOString();
     const startMs = Date.now();
     const cid = handle.containerId ?? "";
     const args = ["exec", cid, "claude", ...DEFAULT_CLAUDE_ARGS, prompt];
@@ -498,6 +499,28 @@ export class DockerRunner implements AgentRunner {
       child.stderr?.on("data", (c: Buffer) => {
         stderr += c.toString("utf8");
       });
+
+      let logsChild: ChildProcess | undefined;
+      if (opts.runId !== undefined && opts.resultsDir !== undefined) {
+        try {
+          const runDir = path.join(opts.resultsDir, opts.runId);
+          mkdirSync(runDir, { recursive: true });
+          const logPath = path.join(runDir, `docker-${turnIndex}.log`);
+          logsChild = spawn("docker", ["logs", "--follow", "--since", logsStartTime, cid], { stdio: ["ignore", "pipe", "ignore"] });
+          let firstChunk = true;
+          logsChild.stdout?.on("data", (chunk: Buffer) => {
+            try {
+              const data = chunk.toString("utf8");
+              if (firstChunk && turnIndex > 0) {
+                appendFileSync(logPath, "--- turn " + turnIndex + " ---\n", "utf8");
+                firstChunk = false;
+              }
+              appendFileSync(logPath, data, "utf8");
+            } catch (err) { void err; }
+          });
+        } catch (err) { void err; }
+      }
+
       const timer = setTimeout(() => {
         if (finished) return;
         finished = true;
@@ -506,6 +529,9 @@ export class DockerRunner implements AgentRunner {
         } catch (err) { void err;
           // docker exec process may have already exited; container is handled in stop().
         }
+        try {
+          logsChild?.kill("SIGKILL");
+        } catch (err) { void err; }
         resume(
           Effect.fail(
             new AgentRunTimeoutError({
@@ -520,6 +546,9 @@ export class DockerRunner implements AgentRunner {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
+        try {
+          logsChild?.kill("SIGKILL");
+        } catch (err) { void err; }
         handle.turnsExecuted.count += 1;
         const parsed = parseStreamJson(stdout);
         const responseText = parsed.response.length > 0 ? parsed.response : stderr;
@@ -541,6 +570,9 @@ export class DockerRunner implements AgentRunner {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
+        try {
+          logsChild?.kill("SIGKILL");
+        } catch (err) { void err; }
         resume(
           Effect.fail(
             new AgentRunTimeoutError({
@@ -558,6 +590,9 @@ export class DockerRunner implements AgentRunner {
         } catch (err) { void err;
           // Interrupted mid-flight; container cleanup is stop()'s job.
         }
+        try {
+          logsChild?.kill("SIGKILL");
+        } catch (err) { void err; }
       });
     });
   }

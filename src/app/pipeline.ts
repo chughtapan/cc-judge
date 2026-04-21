@@ -203,6 +203,9 @@ function runAgentTurns(
   handle: AgentHandle,
   scenario: Scenario,
   timeoutMs: number,
+  runId: string,
+  resultsDir: string,
+  streamEvents: boolean,
 ): Effect.Effect<
   { readonly turns: ReadonlyArray<Turn>; readonly error: string | null },
   never,
@@ -213,12 +216,18 @@ function runAgentTurns(
     const turns: Turn[] = [];
     let error: string | null = null;
     for (const prompt of prompts) {
-      const attempt = yield* Effect.either(runner.turn(handle, prompt, { timeoutMs }));
+      const attempt = yield* Effect.either(runner.turn(handle, prompt, { timeoutMs, runId, resultsDir }));
       if (attempt._tag === "Left") {
         error = `agent turn timed out after ${String(timeoutMs)}ms (turn ${String(attempt.left.turnIndex)})`;
         break;
       }
-      turns.push(attempt.right);
+      const turn = attempt.right;
+      turns.push(turn);
+      if (streamEvents) {
+        try {
+          process.stderr.write(`[turn] ${JSON.stringify({ index: turn.index, prompt: turn.prompt, responseLen: turn.response.length })}\n`);
+        } catch (err) { void err; }
+      }
     }
     return { turns: turns as ReadonlyArray<Turn>, error };
   });
@@ -234,10 +243,16 @@ function runOneScenarioOnce(
   modelName: string,
   judgeModel: string,
   abortSignal: AbortSignal | undefined,
+  resultsDir: string,
+  streamEvents: boolean,
 ): Effect.Effect<RunRecord, never, never> {
   return Effect.gen(function* () {
     const startedAt = nowIso();
     const startMs = Date.now();
+    const runId = randomUUID();
+      try {
+        process.stderr.write(`[scenario] ${scenario.id} runId=${runId}\n`);
+      } catch (err) { void err; }
     const startRes = yield* Effect.either(runner.start(scenario));
     if (startRes._tag === "Left") {
       const msg = `agent start failed: ${startRes.left.cause._tag}`;
@@ -259,7 +274,7 @@ function runOneScenarioOnce(
     }
     const handle = startRes.right;
     const turnTimeout = scenario.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
-    const turnRes = yield* runAgentTurns(runner, handle, scenario, turnTimeout);
+    const turnRes = yield* runAgentTurns(runner, handle, scenario, turnTimeout, runId, resultsDir, streamEvents);
     const diff = yield* runner.diff(handle);
     yield* runner.stop(handle);
     const judgeResult = turnRes.error !== null
@@ -347,6 +362,7 @@ export function runScenarios(
     }
 
     const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
+    const streamEvents = opts.streamEvents ?? false;
     const records = yield* Effect.forEach(
       jobs,
       (j) =>
@@ -360,6 +376,8 @@ export function runScenarios(
           modelName,
           judgeModel,
           opts.abortSignal,
+          resultsDir,
+          streamEvents,
         ),
       { concurrency },
     );

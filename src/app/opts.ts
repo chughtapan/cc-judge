@@ -25,6 +25,7 @@ export interface RunOpts extends SharedOpts {
   readonly runtime?: AgentRuntime;
   readonly coordinator?: RunCoordinator;
   readonly scenarioIdFilter?: ReadonlyArray<string>;
+  readonly streamEvents?: boolean;
 }
 
 export interface ScoreOpts extends SharedOpts {
