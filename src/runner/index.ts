@@ -295,6 +295,7 @@ export class SubprocessRunner implements AgentRunner {
   ): Effect.Effect<Turn, AgentRunTimeoutError, never> {
     const turnIndex = handle.turnsExecuted.count;
     const startedAt = new Date().toISOString();
+    const logsStartTime = new Date().toISOString();
     const startMs = Date.now();
     const args = [...(this.#opts.extraArgs ?? DEFAULT_CLAUDE_ARGS), prompt];
     const cwd = this.#opts.cwd ?? handle.workspaceDir;
@@ -483,6 +484,7 @@ export class DockerRunner implements AgentRunner {
   ): Effect.Effect<Turn, AgentRunTimeoutError, never> {
     const turnIndex = handle.turnsExecuted.count;
     const startedAt = new Date().toISOString();
+    const logsStartTime = new Date().toISOString();
     const startMs = Date.now();
     const cid = handle.containerId ?? "";
     const args = ["exec", cid, "claude", ...DEFAULT_CLAUDE_ARGS, prompt];
@@ -505,7 +507,7 @@ export class DockerRunner implements AgentRunner {
           const runDir = path.join(opts.resultsDir, opts.runId);
           mkdirSync(runDir, { recursive: true });
           const logPath = path.join(runDir, `docker-${turnIndex}.log`);
-          logsChild = spawn("docker", ["logs", "--follow", cid], { stdio: ["ignore", "pipe", "ignore"] });
+          logsChild = spawn("docker", ["logs", "--follow", "--since", logsStartTime, cid], { stdio: ["ignore", "pipe", "ignore"] });
           let firstChunk = true;
           logsChild.stdout?.on("data", (chunk: Buffer) => {
             try {

@@ -250,6 +250,9 @@ function runOneScenarioOnce(
     const startedAt = nowIso();
     const startMs = Date.now();
     const runId = randomUUID();
+      try {
+        process.stderr.write(`[scenario] ${scenario.id} runId=${runId}\n`);
+      } catch (err) { void err; }
     const startRes = yield* Effect.either(runner.start(scenario));
     if (startRes._tag === "Left") {
       const msg = `agent start failed: ${startRes.left.cause._tag}`;
