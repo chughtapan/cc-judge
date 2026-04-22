@@ -12,7 +12,7 @@ export class PlannedHarnessSchemaError extends Data.TaggedError(
 }> {}
 
 export type PlannedHarnessSchemaErrorCause =
-  | { readonly _tag: "TopLevelNotObject"; readonly path: PlanFilePath }
+  | { readonly _tag: "TopLevelNotDocument"; readonly path: PlanFilePath }
   | {
       readonly _tag: "UnsupportedHarnessKind";
       readonly path: PlanFilePath;
@@ -31,13 +31,9 @@ export function decodePromptWorkspacePlanSpec(
   throw new Error("not implemented");
 }
 
-export function decodePlannedHarnessDocuments(
+export function decodePlannedHarnessDocument(
   _source: unknown,
   _originPath: PlanFilePath,
-): Effect.Effect<
-  ReadonlyArray<PlannedHarnessDocument>,
-  PlannedHarnessSchemaError,
-  never
-> {
+): Effect.Effect<PlannedHarnessDocument, PlannedHarnessSchemaError, never> {
   throw new Error("not implemented");
 }

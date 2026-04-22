@@ -20,7 +20,7 @@ export type PlannedHarnessLoadErrorCause =
       readonly message: string;
     }
   | {
-      readonly _tag: "TopLevelNotObject";
+      readonly _tag: "TopLevelNotDocument";
       readonly path: PlanFilePath;
     }
   | {
