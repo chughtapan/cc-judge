@@ -10,7 +10,14 @@ import { scenarioLoader } from "../core/scenario.js";
 import type { Scenario } from "../core/schema.js";
 import type { Trace } from "../core/schema.js";
 import { AnthropicJudgeBackend, JUDGE_SYSTEM_PROMPT } from "../judge/index.js";
-import { DockerRunner, SubprocessRunner, type AgentRunner } from "../runner/index.js";
+import {
+  DockerRunner,
+  DockerRuntime,
+  SubprocessRunner,
+  SubprocessRuntime,
+  type AgentRunner,
+  type AgentRuntime,
+} from "../runner/index.js";
 import { BraintrustEmitter, PromptfooEmitter, type ObservabilityEmitter } from "../emit/observability.js";
 import { getTraceAdapter, type TraceFormat } from "../emit/trace-adapter.js";
 import { glob as doGlob } from "glob";
@@ -18,6 +25,7 @@ import { RunnerResolutionError } from "../core/errors.js";
 import { runScenarios, scoreTraces } from "./pipeline.js";
 import { inspectRun, type InspectErrorCause } from "./inspect.js";
 import { absurd } from "../core/types.js";
+import { runPlannedHarnessPath } from "../plans/compiler.js";
 
 export type CliExitCode = 0 | 1 | 2;
 
@@ -46,6 +54,22 @@ export interface ScoreCliArgs {
   readonly judge: string;
   readonly judgeBackend: string;
   readonly judgeRubric?: string;
+  readonly results: string;
+  readonly githubComment?: number;
+  readonly githubCommentArtifactUrl?: string;
+  readonly concurrency: number;
+  readonly logLevel: "debug" | "info" | "warn" | "error";
+  readonly totalTimeoutMs?: number;
+  readonly emitBraintrust: boolean;
+  readonly emitPromptfoo?: string;
+}
+
+interface RunPlansCliArgs {
+  readonly planPath: string;
+  readonly runtime: "docker" | "subprocess";
+  readonly bin?: string;
+  readonly judge: string;
+  readonly judgeBackend: string;
   readonly results: string;
   readonly githubComment?: number;
   readonly githubCommentArtifactUrl?: string;
@@ -89,6 +113,18 @@ function buildRunner(args: RunCliArgs): Effect.Effect<AgentRunner, RunnerResolut
     );
   }
   return Effect.succeed(new DockerRunner({ image: args.image }));
+}
+
+function buildRuntime(args: RunPlansCliArgs): Effect.Effect<AgentRuntime, RunnerResolutionError, never> {
+  if (args.runtime === "subprocess") {
+    if (args.bin === undefined) {
+      return Effect.fail(
+        new RunnerResolutionError({ cause: { _tag: "InvalidRuntime", value: "subprocess: missing --bin" } }),
+      );
+    }
+    return Effect.succeed(new SubprocessRuntime({ bin: args.bin }));
+  }
+  return Effect.succeed(new DockerRuntime());
 }
 
 export function runCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, never> {
@@ -180,6 +216,69 @@ export function scoreCommand(args: ScoreCliArgs): Effect.Effect<CliExitCode, nev
         : {}),
       ...(args.totalTimeoutMs !== undefined ? { totalTimeoutMs: args.totalTimeoutMs } : {}),
     });
+    process.stdout.write(
+      `cc-judge: ${String(report.summary.passed)}/${String(report.summary.total)} passed\n`,
+    );
+    return (report.summary.failed === 0 ? 0 : 1) as CliExitCode;
+  });
+}
+
+function parseRunPlansArgs(raw: unknown): RunPlansCliArgs {
+  const r = asObject(raw);
+  const runtime = r["runtime"] === "subprocess" ? "subprocess" : "docker";
+  const logLevel = (r["logLevel"] === "debug" || r["logLevel"] === "info" || r["logLevel"] === "warn" || r["logLevel"] === "error")
+    ? r["logLevel"]
+    : "info";
+  return {
+    planPath: typeof r["planPath"] === "string" ? r["planPath"] : "",
+    runtime,
+    ...(typeof r["bin"] === "string" ? { bin: r["bin"] } : {}),
+    judge: typeof r["judge"] === "string" ? r["judge"] : "claude-opus-4-7",
+    judgeBackend: typeof r["judgeBackend"] === "string" ? r["judgeBackend"] : "anthropic",
+    results: typeof r["results"] === "string" ? r["results"] : "./eval-results",
+    ...(typeof r["githubComment"] === "number" ? { githubComment: r["githubComment"] } : {}),
+    ...(typeof r["githubCommentArtifactUrl"] === "string"
+      ? { githubCommentArtifactUrl: r["githubCommentArtifactUrl"] }
+      : {}),
+    concurrency: typeof r["concurrency"] === "number" ? r["concurrency"] : 1,
+    logLevel,
+    ...(typeof r["totalTimeoutMs"] === "number" ? { totalTimeoutMs: r["totalTimeoutMs"] } : {}),
+    emitBraintrust: r["emitBraintrust"] === true,
+    ...(typeof r["emitPromptfoo"] === "string" ? { emitPromptfoo: r["emitPromptfoo"] } : {}),
+  };
+}
+
+function runPlansCommand(args: RunPlansCliArgs): Effect.Effect<CliExitCode, never, never> {
+  return Effect.gen(function* () {
+    const runtimeRes = yield* Effect.either(buildRuntime(args));
+    if (runtimeRes._tag === "Left") {
+      const cause = runtimeRes.left.cause;
+      const detail = cause._tag === "InvalidRuntime" ? cause.value : cause._tag;
+      process.stderr.write(`cc-judge: runtime resolution failed: ${detail}\n`);
+      return 2 as CliExitCode;
+    }
+    const judge = new AnthropicJudgeBackend({ model: args.judge });
+    const emitters = buildObservability(args.emitBraintrust, args.emitPromptfoo);
+    const runRes = yield* Effect.either(
+      runPlannedHarnessPath(args.planPath, {
+        runtime: runtimeRes.right,
+        judge,
+        resultsDir: args.results,
+        concurrency: args.concurrency,
+        emitters,
+        logLevel: args.logLevel,
+        ...(args.githubComment !== undefined ? { githubComment: args.githubComment } : {}),
+        ...(args.githubCommentArtifactUrl !== undefined
+          ? { githubCommentArtifactUrl: args.githubCommentArtifactUrl }
+          : {}),
+        ...(args.totalTimeoutMs !== undefined ? { totalTimeoutMs: args.totalTimeoutMs } : {}),
+      }),
+    );
+    if (runRes._tag === "Left") {
+      process.stderr.write(`cc-judge: planned-harness load failed: ${runRes.left.cause._tag}\n`);
+      return 2 as CliExitCode;
+    }
+    const report = runRes.right;
     process.stdout.write(
       `cc-judge: ${String(report.summary.passed)}/${String(report.summary.total)} passed\n`,
     );
@@ -328,6 +427,22 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
           .option("emit-braintrust", { type: "boolean", default: false })
           .option("emit-promptfoo", { type: "string" }),
       )
+      .command("run-plans <planPath>", "Run planned harness documents", (y) =>
+        y
+          .positional("planPath", { type: "string", demandOption: true })
+          .option("runtime", { choices: ["docker", "subprocess"] as const, default: "docker" })
+          .option("bin", { type: "string" })
+          .option("judge", { type: "string", default: "claude-opus-4-7" })
+          .option("judge-backend", { type: "string", default: "anthropic" })
+          .option("results", { type: "string", default: "./eval-results" })
+          .option("github-comment", { type: "number" })
+          .option("github-comment-artifact-url", { type: "string" })
+          .option("concurrency", { type: "number", default: 1 })
+          .option("log-level", { choices: ["debug", "info", "warn", "error"] as const, default: "info" })
+          .option("total-timeout-ms", { type: "number" })
+          .option("emit-braintrust", { type: "boolean", default: false })
+          .option("emit-promptfoo", { type: "string" }),
+      )
       .command("score <traces>", "Score traces", (y) =>
         y
           .positional("traces", { type: "string", demandOption: true })
@@ -358,6 +473,8 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
     switch (command) {
       case "run":
         return runCommand(parseRunArgs(parsed));
+      case "run-plans":
+        return runPlansCommand(parseRunPlansArgs(parsed));
       case "score":
         return scoreCommand(parseScoreArgs(parsed));
       case "inspect":
