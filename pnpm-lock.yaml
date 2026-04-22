@@ -18,8 +18,8 @@ importers:
         specifier: 0.0.180
         version: 0.0.180(react@19.2.5)(sswr@2.2.0(svelte@5.55.4(@typescript-eslint/types@8.58.2)))(svelte@5.55.4(@typescript-eslint/types@8.58.2))(vue@3.5.32(typescript@5.6.3))(zod@4.3.6)
       effect:
-        specifier: 3.11.10
-        version: 3.11.10
+        specifier: 3.21.0
+        version: 3.21.0
       glob:
         specifier: 11.0.0
         version: 11.0.0
@@ -1096,6 +1096,9 @@ packages:
     resolution: {integrity: sha512-tlqY9xq5ukxTUZBmoOp+m61cqwQD5pHJtFY3Mn8CA8ps6yghLH/Hw8UPdqg4OLmFW3IFlcXnQNmo/dh8HzXYIQ==}
     engines: {node: '>=18'}
 
+  '@standard-schema/spec@1.1.0':
+    resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
+
   '@stryker-mutator/api@9.6.1':
     resolution: {integrity: sha512-g8VNoFWQWbx0pdal3Vt8jVCZW+v3sc3gi94iI0GVtVgUGTqphAjJF6EAruPTx0lqvtonsaAxn5TD36hcG1d6Wg==}
     engines: {node: '>=20.0.0'}
@@ -1653,8 +1656,8 @@ packages:
   eastasianwidth@0.2.0:
     resolution: {integrity: sha512-I88TYZWc9XiYHRQ4/3c5rjjfgkjhLyW2luGIheGERbNQ6OY7yTybanSpDXZa8y7VUP9YmDcYa+eyq4ca7iLqWA==}
 
-  effect@3.11.10:
-    resolution: {integrity: sha512-0gsqCmJh+qaFCxbiKwYVIo3o8CAgI/V5mQjctDZXLOUmnpnpqVMuq8jJVLY412rEYmGvpvvhWY+d8d6mdR9T2w==}
+  effect@3.21.0:
+    resolution: {integrity: sha512-PPN80qRokCd1f015IANNhrwOnLO7GrrMQfk4/lnZRE/8j7UPWrNNjPV0uBrZutI/nHzernbW+J0hdqQysHiSnQ==}
 
   electron-to-chromium@1.5.340:
     resolution: {integrity: sha512-908qahOGocRMinT2nM3ajCEM99H4iPdv84eagPP3FfZy/1ZGeOy2CZYzjhms81ckOPCXPlW7LkY4XpxD8r1DrA==}
@@ -3647,6 +3650,8 @@ snapshots:
 
   '@sindresorhus/merge-streams@4.0.0': {}
 
+  '@standard-schema/spec@1.1.0': {}
+
   '@stryker-mutator/api@9.6.1':
     dependencies:
       mutation-testing-metrics: 3.7.3
@@ -4329,8 +4334,9 @@ snapshots:
 
   eastasianwidth@0.2.0: {}
 
-  effect@3.11.10:
+  effect@3.21.0:
     dependencies:
+      '@standard-schema/spec': 1.1.0
       fast-check: 3.23.2
 
   electron-to-chromium@1.5.340: {}

@@ -55,7 +55,7 @@
     "@anthropic-ai/claude-agent-sdk": "0.1.45",
     "@sinclair/typebox": "0.33.22",
     "braintrust": "0.0.180",
-    "effect": "3.11.10",
+    "effect": "3.21.0",
     "glob": "11.0.0",
     "proper-lockfile": "4.1.2",
     "yaml": "2.6.1",
