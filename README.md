@@ -14,15 +14,19 @@ npm install -g pnpm
 corepack enable
 ```
 
-### ANTHROPIC_API_KEY
+### Anthropic judge auth
 
-The SDK's `AnthropicJudgeBackend` requires the `ANTHROPIC_API_KEY` environment variable:
+The Anthropic judge path can authenticate in either of these ways:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
+# or
+claude auth login
 ```
 
-This key is used only for judge-backend API calls (Claude model invocations). It is not stored or rotated by cc-judge; manage rotation via your credential provider. The key scope is limited to LLM inference; it cannot modify your Anthropic org or billing.
+`ANTHROPIC_API_KEY` is used only for judge-backend API calls (Claude model invocations). It is not stored or rotated by cc-judge; manage rotation via your credential provider. The key scope is limited to LLM inference; it cannot modify your Anthropic org or billing.
+
+If you use the CLI with `--judge-backend anthropic` and no `ANTHROPIC_API_KEY`, `cc-judge` performs a `claude auth status` preflight before `run`, `run-plans`, or `score`. Successful Claude auth checks are cached for 24 hours in the platform cache directory (`$XDG_CACHE_HOME/cc-judge` when set, otherwise the usual per-user cache directory such as `~/.cache/cc-judge` on Linux) so repeated invocations do not keep re-running the auth probe.
 
 ## Install
 
@@ -61,7 +65,7 @@ The `score` command accepts a single file, a glob pattern, or a directory contai
 - `1` — one or more scenarios failed (judgment failed or agent error)
 - `2` — fatal error (invalid config, missing prerequisites like Docker daemon, schema violation)
 
-Exit code `2` indicates an unrecoverable error (e.g., `DockerRunner` cannot reach the daemon, scenario file is malformed, or `ANTHROPIC_API_KEY` is absent). Exit code `1` indicates that one or more test scenarios ran but the judge marked them as failing.
+Exit code `2` indicates an unrecoverable error (e.g., `DockerRunner` cannot reach the daemon, scenario file is malformed, or Anthropic judge auth is unavailable). Exit code `1` indicates that one or more test scenarios ran but the judge marked them as failing.
 
 ## Scenarios
 

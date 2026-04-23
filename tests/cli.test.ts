@@ -14,6 +14,20 @@ import {
 } from "../src/app/cli.js";
 import { itEffect } from "./support/effect.js";
 
+const SAVED_ANTHROPIC_API_KEY = process.env["ANTHROPIC_API_KEY"];
+
+beforeEach(() => {
+  process.env["ANTHROPIC_API_KEY"] = "test-anthropic-api-key";
+});
+
+afterEach(() => {
+  if (SAVED_ANTHROPIC_API_KEY === undefined) {
+    delete process.env["ANTHROPIC_API_KEY"];
+    return;
+  }
+  process.env["ANTHROPIC_API_KEY"] = SAVED_ANTHROPIC_API_KEY;
+});
+
 // ---------------------------------------------------------------------------
 // Mock runScenarios / scoreTraces to capture opts passed from cli.ts.
 // This kills ConditionalExpression, EqualityOperator, and ObjectLiteral

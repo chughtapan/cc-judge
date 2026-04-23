@@ -26,6 +26,7 @@ import { runScenarios, scoreTraces } from "./pipeline.js";
 import { inspectRun, type InspectErrorCause } from "./inspect.js";
 import { absurd } from "../core/types.js";
 import { runPlannedHarnessPath } from "../plans/compiler.js";
+import { ensureJudgeReady } from "./judge-preflight.js";
 
 export type CliExitCode = 0 | 1 | 2;
 
@@ -471,12 +472,33 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
 
     const command = Array.isArray(parsed._) && parsed._.length > 0 ? String(parsed._[0]) : "";
     switch (command) {
-      case "run":
-        return runCommand(parseRunArgs(parsed));
-      case "run-plans":
-        return runPlansCommand(parseRunPlansArgs(parsed));
-      case "score":
-        return scoreCommand(parseScoreArgs(parsed));
+      case "run": {
+        const args = parseRunArgs(parsed);
+        const preflightError = ensureJudgeReady(args.judgeBackend);
+        if (preflightError !== null) {
+          process.stderr.write(`cc-judge: ${preflightError}\n`);
+          return Effect.succeed(2 as CliExitCode);
+        }
+        return runCommand(args);
+      }
+      case "run-plans": {
+        const args = parseRunPlansArgs(parsed);
+        const preflightError = ensureJudgeReady(args.judgeBackend);
+        if (preflightError !== null) {
+          process.stderr.write(`cc-judge: ${preflightError}\n`);
+          return Effect.succeed(2 as CliExitCode);
+        }
+        return runPlansCommand(args);
+      }
+      case "score": {
+        const args = parseScoreArgs(parsed);
+        const preflightError = ensureJudgeReady(args.judgeBackend);
+        if (preflightError !== null) {
+          process.stderr.write(`cc-judge: ${preflightError}\n`);
+          return Effect.succeed(2 as CliExitCode);
+        }
+        return scoreCommand(args);
+      }
       case "inspect":
         return inspectCommand(parseInspectArgs(parsed));
       default:
