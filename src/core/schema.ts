@@ -4,7 +4,6 @@
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import type {
   AgentRef,
-  DeterministicCtx,
   Issue,
   IssueSeverity,
   Phase,
@@ -15,7 +14,6 @@ import type {
   TraceId,
   Turn,
   WorkspaceDiff,
-  WorkspaceFile,
 } from "./types.js";
 
 export const ProjectIdSchema = Type.String({ minLength: 1, maxLength: 256 });
@@ -32,7 +30,6 @@ export const IssueSeveritySchema = Type.Union([
 
 export const RunSourceSchema = Type.Union([
   Type.Literal("bundle"),
-  Type.Literal("scenario"),
   Type.Literal("trace"),
 ]);
 
@@ -212,42 +209,6 @@ export const JudgmentBundleSchema = Type.Object({
   outcomes: Type.Array(AgentOutcomeSchema, { minItems: 1 }),
   metadata: Type.Optional(UnknownRecordSchema),
 });
-
-// YAML-shaped Scenario. Function-valued deterministic checks cannot round-trip
-// through YAML; they are TS-only. ScenarioYamlSchema is the strict decode target.
-export const ScenarioYamlSchema = Type.Object({
-  id: ScenarioIdSchema,
-  name: Type.String({ minLength: 1 }),
-  description: Type.String(),
-  setupPrompt: Type.String({ minLength: 1 }),
-  followUps: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-  workspace: Type.Optional(Type.Array(WorkspaceFileSchema)),
-  timeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
-  expectedBehavior: Type.String(),
-  validationChecks: Type.Array(Type.String({ minLength: 1 })),
-  metadata: Type.Optional(MetadataSchema),
-  judgeRubric: Type.Optional(Type.String()),
-});
-
-// Full Scenario is the YAML shape plus TS-only function fields. Not a boundary
-// decoder (TS scenarios are type-checked by the compiler); exported for Static<>.
-export const ScenarioSchema = ScenarioYamlSchema;
-
-export interface Scenario {
-  readonly id: ScenarioId;
-  readonly name: string;
-  readonly description: string;
-  readonly setupPrompt: string;
-  readonly followUps?: ReadonlyArray<string>;
-  readonly workspace?: ReadonlyArray<WorkspaceFile>;
-  readonly timeoutMs?: number;
-  readonly expectedBehavior: string;
-  readonly validationChecks: ReadonlyArray<string>;
-  readonly deterministicPassCheck?: (ctx: DeterministicCtx) => boolean;
-  readonly deterministicFailCheck?: (ctx: DeterministicCtx) => boolean;
-  readonly metadata?: Readonly<Record<string, string | number | boolean>>;
-  readonly judgeRubric?: string;
-}
 
 export const JudgeResultSchema = Type.Object({
   pass: Type.Boolean(),

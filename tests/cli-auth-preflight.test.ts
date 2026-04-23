@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Effect } from "effect";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as YAML from "yaml";
 
 const { spawnSyncMock } = vi.hoisted(() => ({
   spawnSyncMock: vi.fn(),
@@ -10,6 +11,19 @@ const { spawnSyncMock } = vi.hoisted(() => ({
 
 vi.mock("node:child_process", () => ({
   spawnSync: spawnSyncMock,
+}));
+
+vi.mock("../src/app/pipeline.js", () => ({
+  scoreTraces: vi.fn(() =>
+    Effect.succeed({
+      runs: [],
+      summary: { total: 0, passed: 0, failed: 0, avgLatencyMs: 0 },
+    })),
+  runPlans: vi.fn(() =>
+    Effect.succeed({
+      runs: [],
+      summary: { total: 0, passed: 0, failed: 0, avgLatencyMs: 0 },
+    })),
 }));
 
 import { main } from "../src/app/cli.js";
@@ -21,6 +35,61 @@ import { itEffect } from "./support/effect.js";
 
 const SAVED_XDG_CACHE_HOME = process.env["XDG_CACHE_HOME"];
 const SAVED_ANTHROPIC_API_KEY = process.env["ANTHROPIC_API_KEY"];
+
+function writeHarnessPlan(dir: string, fileName: string): string {
+  const modulePath = path.join(dir, "fixture-harness.mjs");
+  writeFileSync(
+    modulePath,
+    [
+      "import { Effect } from 'effect';",
+      "export default {",
+      "  load(args) {",
+      "    return Effect.succeed({",
+      "      plan: {",
+      "        project: args.plan.project,",
+      "        scenarioId: args.plan.scenarioId,",
+      "        name: args.plan.name,",
+      "        description: args.plan.description,",
+      "        requirements: args.plan.requirements,",
+      "        agents: [",
+      "          {",
+      "            id: 'alpha',",
+      "            name: 'Alpha',",
+      "            artifact: { _tag: 'DockerImageArtifact', image: 'repo/alpha:latest' },",
+      "            promptInputs: {},",
+      "          },",
+      "        ],",
+      "      },",
+      "      harness: { name: 'fixture-harness', run: () => Effect.void },",
+      "    });",
+      "  },",
+      "};",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const filePath = path.join(dir, fileName);
+  writeFileSync(
+    filePath,
+    YAML.stringify({
+      project: "cc-judge",
+      scenarioId: "preflight-harness",
+      name: "preflight-harness",
+      description: "harness plan for auth preflight coverage",
+      requirements: {
+        expectedBehavior: "reply",
+        validationChecks: ["responds"],
+      },
+      harness: {
+        module: modulePath,
+        payload: {},
+      },
+    }),
+    "utf8",
+  );
+  return filePath;
+}
 
 function installStderrCapture(): { chunks: string[]; restore: () => void } {
   const chunks: string[] = [];
@@ -69,10 +138,21 @@ describe("main anthropic auth preflight", () => {
       stderr: "not logged in",
       error: undefined,
     });
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-cli-auth-run-"));
+    const scenarioPath = writeHarnessPlan(dir, "plan.yaml");
 
     const { chunks, restore } = installStderrCapture();
     const code = yield* Effect.ensuring(
-      main(["run", "/tmp/cc-judge-scenario-does-not-matter", "--results", "/tmp/cc-judge-results"]),
+      main([
+        "run",
+        scenarioPath,
+        "--runtime",
+        "subprocess",
+        "--bin",
+        "/bin/echo",
+        "--results",
+        "/tmp/cc-judge-results",
+      ]),
       Effect.sync(restore),
     );
 
@@ -87,9 +167,29 @@ describe("main anthropic auth preflight", () => {
       stderr: "",
       error: undefined,
     });
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-cli-auth-cache-run-"));
+    const scenarioPath = writeHarnessPlan(dir, "plan.yaml");
 
-    yield* main(["run", "/tmp/cc-judge-scenario-missing", "--results", "/tmp/cc-judge-results-a"]);
-    yield* main(["run", "/tmp/cc-judge-scenario-missing", "--results", "/tmp/cc-judge-results-b"]);
+    yield* main([
+      "run",
+      scenarioPath,
+      "--runtime",
+      "subprocess",
+      "--bin",
+      "/bin/echo",
+      "--results",
+      "/tmp/cc-judge-results-a",
+    ]);
+    yield* main([
+      "run",
+      scenarioPath,
+      "--runtime",
+      "subprocess",
+      "--bin",
+      "/bin/echo",
+      "--results",
+      "/tmp/cc-judge-results-b",
+    ]);
 
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });

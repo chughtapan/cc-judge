@@ -30,7 +30,7 @@ const BRAINTRUST_PROJECT = "test-project";
 
 function makeRecord(id: string, pass: boolean, inputTokens: number, outputTokens: number): RunRecord {
   return {
-    source: RUN_SOURCE.Scenario,
+    source: RUN_SOURCE.Trace,
     scenarioId: ScenarioId(id),
     runNumber: RunNumber(1),
     modelName: "test-model",
@@ -153,4 +153,3 @@ describe("PromptfooEmitter", () => {
   });
 
 });
-

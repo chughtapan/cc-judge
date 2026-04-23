@@ -18,9 +18,9 @@ export const TraceId = Brand.nominal<TraceId>();
 export const RunNumber = Brand.nominal<RunNumber>();
 
 // Explicit, named conversion from TraceId to ScenarioId. Used only by the
-// trace-scoring path when a Trace omits scenarioId — the trace is synthesized
-// into a pseudo-Scenario so the judge can consume it. Naming the conversion
-// makes the brand crossing auditable (Principle 1: no silent brand laundering).
+// trace-scoring path when a Trace omits scenarioId so the judgment target still
+// has a stable identifier. Naming the conversion makes the brand crossing
+// auditable (Principle 1: no silent brand laundering).
 export function scenarioIdFromTraceId(t: TraceId): ScenarioId {
   return ScenarioId(t);
 }
@@ -33,11 +33,10 @@ export const ISSUE_SEVERITY = {
   Critical: "critical",
 } as const satisfies { readonly [K in Capitalize<IssueSeverity>]: Uncapitalize<K> };
 
-export type RunSource = "bundle" | "scenario" | "trace";
+export type RunSource = "bundle" | "trace";
 
 export const RUN_SOURCE = {
   Bundle: "bundle",
-  Scenario: "scenario",
   Trace: "trace",
 } as const satisfies { readonly [K in Capitalize<RunSource>]: Uncapitalize<K> };
 
@@ -193,11 +192,6 @@ export interface JudgmentBundle {
   readonly workspaceDiff?: WorkspaceDiff;
   readonly outcomes: ReadonlyArray<AgentOutcome>;
   readonly metadata?: Readonly<Record<string, unknown>>;
-}
-
-export interface DeterministicCtx {
-  readonly transcript: string;
-  readonly diff: WorkspaceDiff;
 }
 
 export function agentRefFromDeclaration(agent: AgentDeclaration): AgentRef {

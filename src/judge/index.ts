@@ -13,18 +13,26 @@ import type {
   IssueSeverity,
   JudgmentBundle,
   Phase,
+  RunRequirements,
+  ScenarioId,
   TraceEvent,
   Turn,
   WorkspaceDiff,
 } from "../core/types.js";
 import {
   type JudgeResult,
-  type Scenario,
   JudgeResultSchema,
 } from "../core/schema.js";
 
+export interface JudgeTarget {
+  readonly scenarioId: ScenarioId;
+  readonly name: string;
+  readonly description: string;
+  readonly requirements: RunRequirements;
+}
+
 export interface JudgeInput {
-  readonly scenario: Scenario;
+  readonly target: JudgeTarget;
   readonly turns: ReadonlyArray<Turn>;
   readonly workspaceDiff?: WorkspaceDiff;
   readonly events?: ReadonlyArray<TraceEvent>;
@@ -56,7 +64,7 @@ const DEFAULT_PER_ATTEMPT_TIMEOUT_MS = 120_000;
 const DEFAULT_RETRY_SCHEDULE: ReadonlyArray<number> = [500, 1_500, 4_500];
 
 // What we ask the judge model to emit. Kept tight so parse errors are rare.
-export const JUDGE_SYSTEM_PROMPT = `You are a verdict-only evaluator. Read the scenario, the agent transcript, and the workspace diff; then emit a single JSON object and nothing else. Schema:
+export const JUDGE_SYSTEM_PROMPT = `You are a verdict-only evaluator. Read the evaluation target, the agent transcript, and the workspace diff; then emit a single JSON object and nothing else. Schema:
 {
   "pass": boolean,
   "reason": string,
@@ -64,7 +72,7 @@ export const JUDGE_SYSTEM_PROMPT = `You are a verdict-only evaluator. Read the s
   "overallSeverity": "minor" | "significant" | "critical" | null,
   "judgeConfidence": number (0-1)
 }
-Every validation check in the scenario is either met or not; list unmet checks as issues. If pass is true, issues may still list minor nits. overallSeverity is null when pass is true and no issues were listed, otherwise the most severe issue. Do not wrap the JSON in markdown fences.`;
+Every validation check in the evaluation target is either met or not; list unmet checks as issues. If pass is true, issues may still list minor nits. overallSeverity is null when pass is true and no issues were listed, otherwise the most severe issue. Do not wrap the JSON in markdown fences.`;
 
 function renderDiff(diff: WorkspaceDiff | undefined): string {
   if (diff === undefined || diff.changed.length === 0) return "(no workspace changes)";
@@ -116,15 +124,12 @@ function renderAgents(agents: ReadonlyArray<AgentRef>): string {
   return agents.map((a) => `- ${a.name} (${a.id})${a.role ? ` role=${a.role}` : ""}`).join("\n");
 }
 
-function bundleToScenario(bundle: JudgmentBundle): Scenario {
+function bundleToJudgeTarget(bundle: JudgmentBundle): JudgeTarget {
   return {
-    id: bundle.scenarioId,
+    scenarioId: bundle.scenarioId,
     name: bundle.name,
     description: bundle.description,
-    setupPrompt: "",
-    expectedBehavior: bundle.requirements.expectedBehavior,
-    validationChecks: bundle.requirements.validationChecks,
-    ...(bundle.requirements.judgeRubric !== undefined ? { judgeRubric: bundle.requirements.judgeRubric } : {}),
+    requirements: bundle.requirements,
   };
 }
 
@@ -183,7 +188,7 @@ export function bundleToJudgeInput(bundle: JudgmentBundle, abortSignal?: AbortSi
     agentOutcomes: bundle.outcomes,
   };
   return {
-    scenario: bundleToScenario(bundle),
+    target: bundleToJudgeTarget(bundle),
     turns: bundleTurnsToTurns(bundle),
     ...(bundle.workspaceDiff !== undefined ? { workspaceDiff: bundle.workspaceDiff } : {}),
     ...(events !== undefined ? { events } : {}),
@@ -203,12 +208,12 @@ export function judgeBundle(
 }
 
 function renderPrompt(input: JudgeInput): string {
-  const s = input.scenario;
-  const checks = s.validationChecks.map((c, i) => `${i + 1}. ${c}`).join("\n");
+  const target = input.target;
+  const checks = target.requirements.validationChecks.map((c, i) => `${i + 1}. ${c}`).join("\n");
   const sections: string[] = [
-    `# Scenario: ${s.name}`,
-    `Description: ${s.description}`,
-    `Expected behavior: ${s.expectedBehavior}`,
+    `# Evaluation target: ${target.name}`,
+    `Description: ${target.description}`,
+    `Expected behavior: ${target.requirements.expectedBehavior}`,
     "",
     "Validation checks (each must hold for pass=true):",
     checks,
@@ -306,6 +311,7 @@ function collectSdkMessages(
   maxTurns: number,
   abortController: AbortController,
   systemPrompt: string,
+  timeoutMs: number,
 ): Effect.Effect<ReadonlyArray<SDKMessage>, JudgeAttemptError, never> {
   return Effect.suspend(() => {
     const q = query({
@@ -320,20 +326,51 @@ function collectSdkMessages(
     });
     const iter = q[Symbol.asyncIterator]();
     const collected: SDKMessage[] = [];
-    const step: Effect.Effect<ReadonlyArray<SDKMessage>, JudgeAttemptError, never> = Effect.tryPromise({
+    const deadline = Date.now() + timeoutMs;
+
+    const nextWithTimeout = Effect.tryPromise({
       try: () => iter.next(),
-      catch: (err) =>
+      catch: (error) =>
         new JudgeAttemptError(
           "SdkFailed",
-          err instanceof Error ? err.message : String(err),
+          error instanceof Error ? error.message : String(error),
         ),
     }).pipe(
-      Effect.flatMap((r) => {
-        if (r.done === true) return Effect.succeed(collected as ReadonlyArray<SDKMessage>);
-        collected.push(r.value);
+      Effect.timeoutFail({
+        duration: Math.max(1, deadline - Date.now()),
+        onTimeout: () => new JudgeAttemptError("Timeout", `per-attempt timeout after ${timeoutMs}ms`),
+      }),
+      Effect.tapError((error) =>
+        error.kind === "Timeout"
+          ? Effect.sync(() => {
+              abortController.abort();
+            }).pipe(
+              Effect.zipRight(
+                Effect.tryPromise({
+                  try: () => iter.return?.() ?? Promise.resolve(undefined),
+                  catch: (returnError) => returnError,
+                }).pipe(
+                  Effect.catchAll((returnError) => {
+                    void returnError;
+                    return Effect.void;
+                  }),
+                ),
+              ),
+            )
+          : Effect.void,
+      ),
+    );
+
+      const step: Effect.Effect<ReadonlyArray<SDKMessage>, JudgeAttemptError, never> = nextWithTimeout.pipe(
+        Effect.flatMap((result) => {
+          if (result.done === true) {
+            return Effect.succeed(collected as ReadonlyArray<SDKMessage>);
+        }
+        collected.push(result.value);
         return step;
       }),
     );
+
     return step;
   });
 }
@@ -447,24 +484,6 @@ function criticalFallback(
   };
 }
 
-function timeoutEff<A>(
-  inner: Effect.Effect<A, JudgeAttemptError, never>,
-  ms: number,
-  abortController: AbortController,
-): Effect.Effect<A, JudgeAttemptError, never> {
-  return Effect.race(
-    inner,
-    sleepEff(ms).pipe(
-      Effect.flatMap(() => {
-        abortController.abort();
-        return Effect.fail<JudgeAttemptError>(
-          new JudgeAttemptError("Timeout", `per-attempt timeout after ${ms}ms`),
-        );
-      }),
-    ),
-  );
-}
-
 function runAttempt(
   input: JudgeInput,
   systemPrompt: string,
@@ -480,7 +499,14 @@ function runAttempt(
     else parentSignal.addEventListener("abort", () => abortController.abort(), { once: true });
   }
   const prompt = renderPrompt(input);
-  const collect = collectSdkMessages(prompt, model, maxTurns, abortController, systemPrompt).pipe(
+  return collectSdkMessages(
+    prompt,
+    model,
+    maxTurns,
+    abortController,
+    systemPrompt,
+    timeoutMs,
+  ).pipe(
     Effect.flatMap((messages) => {
       for (const m of messages) {
         if (m.type === "result" && m.subtype !== "success") {
@@ -496,7 +522,6 @@ function runAttempt(
     }),
     Effect.map((r): JudgeResult => ({ ...r, retryCount: attempt })),
   );
-  return timeoutEff(collect, timeoutMs, abortController);
 }
 
 export class AnthropicJudgeBackend implements JudgeBackend {
@@ -521,7 +546,7 @@ export class AnthropicJudgeBackend implements JudgeBackend {
     const timeoutMs = this.#perAttemptTimeoutMs;
     const schedule = this.#retrySchedule;
     const basePrompt = this.#systemPrompt;
-    const rubric = (input.scenario as { judgeRubric?: string }).judgeRubric;
+    const rubric = input.target.requirements.judgeRubric;
     const effectivePrompt = rubric !== undefined && rubric.length > 0
       ? `${basePrompt}\n\n${rubric}`
       : basePrompt;
@@ -539,6 +564,9 @@ export class AnthropicJudgeBackend implements JudgeBackend {
         );
         if (res._tag === "Right") return res.right;
         lastErr = res.left;
+        if (lastErr.kind === "ResultError") {
+          return criticalFallback(lastErr, attempt);
+        }
         attempt += 1;
       }
       return criticalFallback(lastErr, attempt - 1);

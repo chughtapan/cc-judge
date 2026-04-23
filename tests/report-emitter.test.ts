@@ -55,7 +55,7 @@ const SUMMARY_ISSUES_LABEL = "- issues:";
 
 function makeRecord(id: string, run: number, pass: boolean): RunRecord {
   return {
-    source: "scenario",
+    source: "trace",
     scenarioId: ScenarioId(id),
     runNumber: RunNumber(run),
     modelName: "test-model",
