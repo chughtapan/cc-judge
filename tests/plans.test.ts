@@ -1,4 +1,4 @@
-import { describe, expect, afterEach, vi } from "vitest";
+import { describe, expect, afterEach, beforeEach, vi } from "vitest";
 import { Effect } from "effect";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
@@ -17,6 +17,7 @@ import { itEffect, EITHER_LEFT, EITHER_RIGHT } from "./support/effect.js";
 
 let capturedPlannedInputs: ReadonlyArray<unknown> | null = null;
 let capturedHarnessRunOpts: Record<string, unknown> | null = null;
+const SAVED_ANTHROPIC_API_KEY = process.env["ANTHROPIC_API_KEY"];
 
 vi.mock("../src/app/pipeline.js", () => ({
   runScenarios: vi.fn(() =>
@@ -93,6 +94,15 @@ function writePlanFile(dir: string, name: string, yaml: string): string {
 afterEach(() => {
   capturedPlannedInputs = null;
   capturedHarnessRunOpts = null;
+  if (SAVED_ANTHROPIC_API_KEY === undefined) {
+    delete process.env["ANTHROPIC_API_KEY"];
+    return;
+  }
+  process.env["ANTHROPIC_API_KEY"] = SAVED_ANTHROPIC_API_KEY;
+});
+
+beforeEach(() => {
+  process.env["ANTHROPIC_API_KEY"] = "test-anthropic-api-key";
 });
 
 describe("planned harness schema", () => {
