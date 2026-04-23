@@ -20,6 +20,12 @@ target app and capture a canonical trace.
 If you use a harness that launches Docker workloads, Docker must also be
 available.
 
+When `--judge-backend anthropic` is active and `ANTHROPIC_API_KEY` is not set,
+`cc-judge` runs `claude auth status` before `run` or `score`. Successful auth
+checks are cached for 24 hours under the user cache directory (for example
+`$XDG_CACHE_HOME/cc-judge` or `~/.cache/cc-judge`) so repeated invocations do
+not keep probing Claude auth.
+
 ## Install
 
 ```bash
@@ -214,10 +220,7 @@ cc-judge inspect <run-id>
 
 ### `run`
 
-`run` accepts either:
-
-- planned harness documents with a top-level `harness` block
-- legacy prompt/workspace scenarios
+`run` accepts harness-backed plan documents with a top-level `harness` block.
 
 Important options:
 
@@ -256,8 +259,7 @@ Important options:
 
 Main entrypoints:
 
-- `runScenarios(...)` for legacy prompt/workspace scenarios
-- `runPlans(...)` for planned harness inputs
+- `runPlans(...)` for harness-backed planned runs
 - `scoreTraces(...)`
 - `scoreBundles(...)`
 
@@ -269,7 +271,6 @@ Harness ingress types:
 
 Which entrypoint to use:
 
-- `runScenarios(...)`: legacy prompt/workspace scenarios
 - `runPlans(...)`: harness-backed planned runs
 - `scoreTraces(...)`: scoring-only path for canonical or OTel traces
 - `scoreBundles(...)`: scoring-only path when you already have normalized bundles

@@ -3,14 +3,13 @@
 
 import type { JudgeBackend } from "../judge/index.js";
 import type { ObservabilityEmitter } from "../emit/observability.js";
-import type { AgentRunner, AgentRuntime, ExecutionHarness, RunCoordinator } from "../runner/index.js";
+import type { AgentRuntime, ExecutionHarness, RunCoordinator } from "../runner/index.js";
 import type { LogLevel, RunPlan } from "../core/types.js";
 import type { TraceFormat } from "../emit/trace-adapter.js";
 
 export interface SharedOpts {
   readonly judge?: JudgeBackend;
   readonly resultsDir?: string;
-  readonly runsPerScenario?: number;
   readonly concurrency?: number;
   readonly logLevel?: LogLevel;
   readonly totalTimeoutMs?: number;
@@ -18,13 +17,6 @@ export interface SharedOpts {
   readonly githubComment?: number;
   readonly githubCommentArtifactUrl?: string;
   readonly abortSignal?: AbortSignal;
-}
-
-export interface RunOpts extends SharedOpts {
-  readonly runner?: AgentRunner;
-  readonly runtime?: AgentRuntime;
-  readonly coordinator?: RunCoordinator;
-  readonly scenarioIdFilter?: ReadonlyArray<string>;
 }
 
 export interface ScoreOpts extends SharedOpts {

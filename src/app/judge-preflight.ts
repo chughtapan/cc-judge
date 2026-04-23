@@ -1,11 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-
-interface ClaudeAuthStatus {
-  readonly loggedIn?: unknown;
-}
+import * as os from "node:os";
+import * as path from "node:path";
 
 interface AnthropicAuthSuccessCache {
   readonly checkedAtMs: number;
@@ -24,13 +20,25 @@ function shouldPreflightClaudeAuth(judgeBackend: string): boolean {
   return (process.env["ANTHROPIC_API_KEY"] ?? "").trim().length === 0;
 }
 
+function resolveCacheHome(): string {
+  const xdgCacheHome = (process.env["XDG_CACHE_HOME"] ?? "").trim();
+  if (xdgCacheHome.length > 0) {
+    return xdgCacheHome;
+  }
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Caches");
+  }
+  if (process.platform === "win32") {
+    const localAppData = (process.env["LOCALAPPDATA"] ?? "").trim();
+    if (localAppData.length > 0) {
+      return localAppData;
+    }
+  }
+  return path.join(os.homedir(), ".cache");
+}
+
 function resolveAnthropicAuthCacheDir(): string {
-  const configuredCacheDir = (process.env["XDG_CACHE_HOME"] ?? "").trim();
-  const baseDir =
-    configuredCacheDir.length > 0
-      ? configuredCacheDir
-      : path.join(os.homedir(), ".cache");
-  return path.join(baseDir, "cc-judge");
+  return path.join(resolveCacheHome(), "cc-judge");
 }
 
 function resolveAnthropicAuthCachePath(): string {
@@ -41,6 +49,14 @@ function cacheStillFresh(expiresAtMs: number, nowMs: number): boolean {
   return expiresAtMs > nowMs;
 }
 
+function clearInvalidDiskCache(pathname: string): void {
+  try {
+    rmSync(pathname, { force: true });
+  } catch (error) {
+    void error;
+  }
+}
+
 function readAnthropicAuthCache(nowMs: number): boolean {
   if (
     cachedAnthropicAuthSuccessUntilMs !== null &&
@@ -49,21 +65,29 @@ function readAnthropicAuthCache(nowMs: number): boolean {
     return true;
   }
 
+  const cachePath = resolveAnthropicAuthCachePath();
   try {
-    const parsed = JSON.parse(
-      readFileSync(resolveAnthropicAuthCachePath(), "utf8"),
-    ) as AnthropicAuthSuccessCache;
-    if (typeof parsed.checkedAtMs !== "number") {
+    const parsed: unknown = JSON.parse(readFileSync(cachePath, "utf8"));
+    if (typeof parsed !== "object" || parsed === null || !("checkedAtMs" in parsed)) {
+      clearInvalidDiskCache(cachePath);
       return false;
     }
-    const expiresAtMs = parsed.checkedAtMs + ANTHROPIC_AUTH_CACHE_TTL_MS;
+    const checkedAtMs = parsed.checkedAtMs;
+    if (typeof checkedAtMs !== "number" || !Number.isFinite(checkedAtMs)) {
+      clearInvalidDiskCache(cachePath);
+      return false;
+    }
+    const expiresAtMs = checkedAtMs + ANTHROPIC_AUTH_CACHE_TTL_MS;
     if (!cacheStillFresh(expiresAtMs, nowMs)) {
+      clearInvalidDiskCache(cachePath);
       return false;
     }
     cachedAnthropicAuthSuccessUntilMs = expiresAtMs;
     return true;
   } catch (error) {
-    void error;
+    if (error instanceof SyntaxError) {
+      clearInvalidDiskCache(cachePath);
+    }
     return false;
   }
 }
@@ -104,9 +128,15 @@ export function ensureJudgeReady(judgeBackend: string): string | null {
       ? `claude auth preflight failed: ${stderr}`
       : "claude auth preflight failed";
   }
+
   try {
-    const parsed = JSON.parse(result.stdout) as ClaudeAuthStatus;
-    if (parsed.loggedIn !== true) {
+    const parsed: unknown = JSON.parse(result.stdout);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      !("loggedIn" in parsed) ||
+      parsed.loggedIn !== true
+    ) {
       return "claude auth missing: run `claude auth login` or set ANTHROPIC_API_KEY";
     }
     writeAnthropicAuthCache(nowMs);
@@ -123,10 +153,5 @@ export function resetJudgePreflightCacheForTests(): void {
 }
 
 export function clearJudgePreflightDiskCacheForTests(): void {
-  try {
-    rmSync(resolveAnthropicAuthCachePath(), { force: true });
-  } catch (error) {
-    void error;
-    // Best-effort cleanup for isolated tests.
-  }
+  clearInvalidDiskCache(resolveAnthropicAuthCachePath());
 }

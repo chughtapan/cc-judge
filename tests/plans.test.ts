@@ -18,11 +18,6 @@ let capturedPlannedInputs: ReadonlyArray<unknown> | null = null;
 let capturedHarnessRunOpts: Record<string, unknown> | null = null;
 
 vi.mock("../src/app/pipeline.js", () => ({
-  runScenarios: vi.fn(() =>
-    Effect.succeed({
-      runs: [],
-      summary: { total: 0, passed: 0, failed: 0, avgLatencyMs: 0 },
-    })),
   scoreTraces: vi.fn(() =>
     Effect.succeed({
       runs: [],
@@ -280,28 +275,6 @@ describe("planned harness compiler + cli ingress", () => {
     expect(capturedPlannedInputs).toHaveLength(1);
   });
 
-  itEffect("returns exit 2 when `run` receives mixed legacy and harness YAML", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-mixed-"));
-    const harnessModulePath = writeHarnessModule(dir);
-    writePlanFile(dir, "harness.yaml", planYaml(harnessModulePath));
-    writePlanFile(
-      dir,
-      "legacy.yaml",
-      YAML.stringify({
-        id: "legacy",
-        name: "legacy",
-        description: "legacy",
-        setupPrompt: "hello",
-        expectedBehavior: "world",
-        validationChecks: ["one"],
-      }),
-    );
-
-    const code = yield* main(["run", path.join(dir, "*.yaml"), "--log-level", "error"]);
-
-    expect(code).toBe(EXIT_FATAL);
-  });
-
   itEffect("returns exit 2 when harness export is missing", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-missing-export-"));
     const harnessModulePath = writeHarnessModule(dir);
@@ -316,17 +289,17 @@ describe("planned harness compiler + cli ingress", () => {
     expect(code).toBe(EXIT_FATAL);
   });
 
-  itEffect("returns exit 2 with a parse error instead of falling back to legacy scenario loading", function* () {
+  itEffect("returns exit 2 with a parse error from the harness plan loader", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-invalid-"));
     const badPath = writePlanFile(dir, "broken.yaml", "harness:\n  module: [\n");
     const { chunks, restore } = installStderrCapture();
 
     const code = yield* Effect.ensuring(
-      main(["run", badPath, "--runtime", "subprocess", "--log-level", "error"]),
+      main(["run", badPath, "--runtime", "subprocess", "--bin", "/bin/echo", "--log-level", "error"]),
       Effect.sync(restore),
     );
 
     expect(code).toBe(EXIT_FATAL);
-    expect(chunks.join("")).toContain("run input parse failed");
+    expect(chunks.join("")).toContain("ParseFailure");
   });
 });

@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import * as os from "node:os";
+import * as path from "node:path";
 
 const { spawnSyncMock } = vi.hoisted(() => ({
   spawnSyncMock: vi.fn(),
@@ -17,6 +17,9 @@ import {
   resetJudgePreflightCacheForTests,
 } from "../src/app/judge-preflight.js";
 
+const SAVED_XDG_CACHE_HOME = process.env["XDG_CACHE_HOME"];
+const SAVED_ANTHROPIC_API_KEY = process.env["ANTHROPIC_API_KEY"];
+
 describe("judge preflight cache", () => {
   beforeEach(() => {
     spawnSyncMock.mockReset();
@@ -26,6 +29,19 @@ describe("judge preflight cache", () => {
       path.join(os.tmpdir(), "cc-judge-auth-cache-"),
     );
     delete process.env["ANTHROPIC_API_KEY"];
+  });
+
+  afterEach(() => {
+    if (SAVED_XDG_CACHE_HOME === undefined) {
+      delete process.env["XDG_CACHE_HOME"];
+    } else {
+      process.env["XDG_CACHE_HOME"] = SAVED_XDG_CACHE_HOME;
+    }
+    if (SAVED_ANTHROPIC_API_KEY === undefined) {
+      delete process.env["ANTHROPIC_API_KEY"];
+    } else {
+      process.env["ANTHROPIC_API_KEY"] = SAVED_ANTHROPIC_API_KEY;
+    }
   });
 
   it("skips preflight entirely when ANTHROPIC_API_KEY is set", () => {

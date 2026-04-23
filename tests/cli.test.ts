@@ -14,32 +14,46 @@ import {
 } from "../src/app/cli.js";
 import { itEffect } from "./support/effect.js";
 
+const SAVED_ANTHROPIC_API_KEY = process.env["ANTHROPIC_API_KEY"];
+
+beforeEach(() => {
+  process.env["ANTHROPIC_API_KEY"] = "test-anthropic-api-key";
+});
+
+afterEach(() => {
+  if (SAVED_ANTHROPIC_API_KEY === undefined) {
+    delete process.env["ANTHROPIC_API_KEY"];
+    return;
+  }
+  process.env["ANTHROPIC_API_KEY"] = SAVED_ANTHROPIC_API_KEY;
+});
+
 // ---------------------------------------------------------------------------
-// Mock runScenarios / scoreTraces to capture opts passed from cli.ts.
-// This kills ConditionalExpression, EqualityOperator, and ObjectLiteral
-// survivors on lines 105, 116-121 (spread args into runScenarios).
+// Mock harness-plan execution / scoreTraces to capture opts passed from cli.ts.
 // ---------------------------------------------------------------------------
 
 let capturedRunOpts: Record<string, unknown> | null = null;
-let capturedRunScenarios: unknown[] | null = null;
+let capturedRunPath: string | null = null;
 let capturedScoreOpts: Record<string, unknown> | null = null;
 let capturedScoreTraces: unknown[] | null = null;
-let mockRunScenariosShouldFail = false;
-let mockRunScenariosFailTag = "NoRunnerConfigured";
+let mockRunHarnessShouldFail = false;
+let mockRunHarnessFailTag = "FileNotFound";
 
-vi.mock("../src/app/pipeline.js", () => ({
-  runScenarios: vi.fn((scenarios: unknown[], opts: Record<string, unknown>) => {
-    if (mockRunScenariosShouldFail) {
-      return Effect.fail({ cause: { _tag: mockRunScenariosFailTag } });
+vi.mock("../src/plans/compiler.js", () => ({
+  runPlannedHarnessPath: vi.fn((pathOrGlob: string, opts: Record<string, unknown>) => {
+    if (mockRunHarnessShouldFail) {
+      return Effect.fail({ cause: { _tag: mockRunHarnessFailTag } });
     }
-    capturedRunScenarios = scenarios;
+    capturedRunPath = pathOrGlob;
     capturedRunOpts = opts;
-    // Return a minimal report so runCommand completes
     return Effect.succeed({
       runs: [],
       summary: { total: 0, passed: 0, failed: 0, avgLatencyMs: 0 },
     });
   }),
+}));
+
+vi.mock("../src/app/pipeline.js", () => ({
   scoreTraces: vi.fn((traces: unknown[], opts: Record<string, unknown>) => {
     capturedScoreTraces = traces;
     capturedScoreOpts = opts;
@@ -59,17 +73,7 @@ const SCEN_PATH_BOGUS = "/tmp/cc-judge-nonexistent-cli-path-xyz";
 const TRACES_PATH_MISSING = "/tmp/cc-judge-nonexistent-traces.json";
 
 function tmpScenarioDir(): string {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-cli-"));
-  const yaml = `
-id: cli-t
-name: cli-t
-description: d
-setupPrompt: p
-expectedBehavior: e
-validationChecks: [c]
-`;
-  writeFileSync(path.join(dir, "a.yaml"), yaml, "utf8");
-  return dir;
+  return mkdtempSync(path.join(os.tmpdir(), "cc-judge-cli-"));
 }
 
 function baseArgs(scenarioDir: string): RunCliArgs {
@@ -78,7 +82,6 @@ function baseArgs(scenarioDir: string): RunCliArgs {
     runtime: "docker",
     judge: "claude-opus-4-7",
     judgeBackend: "anthropic",
-    runs: 1,
     results: mkdtempSync(path.join(os.tmpdir(), "cc-judge-cli-out-")),
     concurrency: 1,
     logLevel: "error",
@@ -87,12 +90,6 @@ function baseArgs(scenarioDir: string): RunCliArgs {
 }
 
 describe("runCommand runner-resolution failure", () => {
-  itEffect("exits 2 when runtime=docker but --image is missing", function* () {
-    const dir = tmpScenarioDir();
-    const code = yield* runCommand(baseArgs(dir));
-    expect(code).toBe(EXIT_RUNNER_RESOLUTION);
-  });
-
   itEffect("exits 2 when runtime=subprocess but --bin is missing", function* () {
     const dir = tmpScenarioDir();
     const args: RunCliArgs = { ...baseArgs(dir), runtime: "subprocess" };
@@ -100,10 +97,13 @@ describe("runCommand runner-resolution failure", () => {
     expect(code).toBe(EXIT_RUNNER_RESOLUTION);
   });
 
-  itEffect("exits 2 when scenario path does not exist (load failure)", function* () {
+  itEffect("exits 2 when harness loading fails", function* () {
+    mockRunHarnessShouldFail = true;
+    mockRunHarnessFailTag = "FileNotFound";
     const args: RunCliArgs = { ...baseArgs("/tmp"), scenarioPath: SCEN_PATH_BOGUS };
     const code = yield* runCommand(args);
     expect(code).toBe(EXIT_LOAD_FAILURE);
+    mockRunHarnessShouldFail = false;
   });
 });
 
@@ -128,7 +128,7 @@ describe("scoreCommand", () => {
 });
 
 describe("main (yargs dispatch)", () => {
-  itEffect("dispatches `run` subcommand to runCommand (exits via runner-resolution path)", function* () {
+  itEffect("dispatches `run` subcommand to the harness plan path", function* () {
     const dir = tmpScenarioDir();
     const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-"));
     const code = yield* main([
@@ -141,7 +141,7 @@ describe("main (yargs dispatch)", () => {
       "--log-level",
       "error",
     ]);
-    expect(code).toBe(EXIT_RUNNER_RESOLUTION);
+    expect(code).toBe(EXIT_SUCCESS);
   });
 
   itEffect("dispatches `score` subcommand with malformed trace → exit 2", function* () {
@@ -198,7 +198,7 @@ describe("main (yargs dispatch)", () => {
       "--log-level",
       "warn",
     ]);
-    expect(code).toBe(EXIT_RUNNER_RESOLUTION);
+    expect(code).toBe(EXIT_SUCCESS);
   });
 });
 
@@ -213,14 +213,12 @@ describe("parseRunArgs", () => {
     expect(args.runtime).toBe("docker");
     expect(args.judge).toBe("claude-opus-4-7");
     expect(args.judgeBackend).toBe("anthropic");
-    expect(args.runs).toBe(1);
     expect(args.results).toBe("./eval-results");
     expect(args.concurrency).toBe(1);
     expect(args.logLevel).toBe("info");
     expect(args.emitBraintrust).toBe(false);
     expect(args.image).toBeUndefined();
     expect(args.bin).toBeUndefined();
-    expect(args.scenarioIds).toBeUndefined();
     expect(args.githubComment).toBeUndefined();
     expect(args.githubCommentArtifactUrl).toBeUndefined();
     expect(args.totalTimeoutMs).toBeUndefined();
@@ -234,16 +232,14 @@ describe("parseRunArgs", () => {
     expect(parseRunArgs([]).scenarioPath).toBe("");
   });
 
-  it("passes through string scenario + image + bin when provided", () => {
+  it("passes through string input + image + bin when provided", () => {
     const args = parseRunArgs({
-      scenario: "/path/to/s",
+      input: "/path/to/s",
       runtime: "subprocess",
       image: "my-img",
       bin: "/usr/bin/claude",
       judge: "claude-custom",
       judgeBackend: "openai",
-      runs: 5,
-      scenarioIds: ["a", "b"],
       results: "/out",
       githubComment: 42,
       githubCommentArtifactUrl: "https://example/art",
@@ -259,8 +255,6 @@ describe("parseRunArgs", () => {
     expect(args.bin).toBe("/usr/bin/claude");
     expect(args.judge).toBe("claude-custom");
     expect(args.judgeBackend).toBe("openai");
-    expect(args.runs).toBe(5);
-    expect(args.scenarioIds).toEqual(["a", "b"]);
     expect(args.results).toBe("/out");
     expect(args.githubComment).toBe(42);
     expect(args.githubCommentArtifactUrl).toBe("https://example/art");
@@ -290,11 +284,10 @@ describe("parseRunArgs", () => {
     expect(parseRunArgs({ logLevel: "error" }).logLevel).toBe("error");
   });
 
-  it("drops image / bin / scenarioIds / githubComment when the wrong type", () => {
+  it("drops image / bin / githubComment when the wrong type", () => {
     const args = parseRunArgs({
       image: 42,
       bin: null,
-      scenarioIds: "not-an-array",
       githubComment: "not-a-number",
       githubCommentArtifactUrl: 99,
       totalTimeoutMs: "not-a-number",
@@ -302,7 +295,6 @@ describe("parseRunArgs", () => {
     });
     expect(args.image).toBeUndefined();
     expect(args.bin).toBeUndefined();
-    expect(args.scenarioIds).toBeUndefined();
     expect(args.githubComment).toBeUndefined();
     expect(args.githubCommentArtifactUrl).toBeUndefined();
     expect(args.totalTimeoutMs).toBeUndefined();
@@ -314,11 +306,6 @@ describe("parseRunArgs", () => {
     expect(parseRunArgs({ emitBraintrust: "true" }).emitBraintrust).toBe(false);
     expect(parseRunArgs({ emitBraintrust: 1 }).emitBraintrust).toBe(false);
     expect(parseRunArgs({ emitBraintrust: true }).emitBraintrust).toBe(true);
-  });
-
-  it("returns runs=1 when runs is not a number", () => {
-    expect(parseRunArgs({ runs: "5" }).runs).toBe(1);
-    expect(parseRunArgs({ runs: null }).runs).toBe(1);
   });
 
   it("returns concurrency=1 when concurrency is not a number", () => {
@@ -412,13 +399,10 @@ describe("parseScoreArgs", () => {
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Helpers for option-passthrough tests.
-// A subprocess runner with bin=/bin/true + a scenarioIdFilter that excludes
-// every scenario means: runner resolves OK, runScenarios is called, the forEach
-// loop runs over zero jobs, report.summary.total === 0. No subprocess spawned.
+// Helpers for harness-run option passthrough tests.
+// The harness path is mocked, so no subprocess or Docker workload is spawned.
 // ──────────────────────────────────────────────────────────────────────────────
 
-const NONEXISTENT_SCENARIO_ID = "cc-judge-nonexistent-id-xyz";
 const BIN_TRUE = "/bin/true";
 const EXIT_SCORE_NO_TRACES = 2;
 const EXIT_SCORE_NO_FILES = 2;
@@ -431,9 +415,6 @@ function stubRunArgs(scenarioDir: string, overrides: Partial<RunCliArgs> = {}): 
     bin: BIN_TRUE,
     judge: "claude-opus-4-7",
     judgeBackend: "anthropic",
-    runs: 1,
-    // Filter excludes all scenarios → no jobs → summary.total === 0
-    scenarioIds: [NONEXISTENT_SCENARIO_ID],
     results: mkdtempSync(path.join(os.tmpdir(), "cc-judge-stub-out-")),
     concurrency: 1,
     logLevel: "error",
@@ -473,75 +454,55 @@ function stubScoreArgs(traceFile: string, overrides: Partial<ScoreCliArgs> = {})
 
 // ──────────────────────────────────────────────────────────────────────────────
 // runCommand option passthrough tests (kills lines 116–121 NoCoverage survivors)
-// Each test passes the optional field and asserts the pipeline reaches the
-// runScenarios call (summary.total === 0 since the filter excludes all ids).
+// Each test passes the optional field and asserts the harness pipeline is called.
 // ──────────────────────────────────────────────────────────────────────────────
 
-describe("runCommand option passthroughs (via stub runner + empty filter)", () => {
-  itEffect("scenarioIds set → runScenarios called → summary.total 0 → exit 0", function* () {
+describe("runCommand option passthroughs (via mocked harness path)", () => {
+  itEffect("runCommand reaches the harness path and exits 0", function* () {
     const dir = tmpScenarioDir();
-    const args = stubRunArgs(dir, { scenarioIds: [NONEXISTENT_SCENARIO_ID] });
+    const args = stubRunArgs(dir);
     const { chunks, restore } = installStderrCapture();
     const code = yield* Effect.ensuring(runCommand(args), Effect.sync(restore));
-    // summary.total=0 means failed=0 → exit 0
     expect(code).toBe(EXIT_SUCCESS);
-    // confirm no runner-resolution failure message
-    expect(chunks.join("")).not.toContain("runner resolution failed");
-  });
-
-  itEffect("scenarioIds undefined → runScenarios called with no filter → exit 0 (no runs)", function* () {
-    const dir = tmpScenarioDir();
-    // Without a scenarioIdFilter the scenario IS included, but the runner
-    // will call runner.start() which will succeed for subprocess (it spawns
-    // /bin/true). We can't safely do that in unit tests, so we test the
-    // defined-vs-undefined branching by checking that the conditional branch
-    // is reached at all. The actual observable difference is tested separately.
-    const args = stubRunArgs(dir, { scenarioIds: undefined });
-    // This will try to run the scenario against /bin/true (subprocess runner).
-    // SubprocessRunner.start() is called — let's just verify the code path
-    // exits without a runner-resolution failure (code 2).
-    // Since it may fail at agent-start level, we accept code 0 or 1.
-    const code = yield* runCommand(args);
-    // code !== EXIT_RUNNER_RESOLUTION means the runner resolved
-    expect(code).not.toBe(EXIT_RUNNER_RESOLUTION);
+    expect(chunks.join("")).not.toContain("runtime resolution failed");
   }, 10_000);
 
-  itEffect("githubComment set → runScenarios called → exit 0", function* () {
+  itEffect("githubComment set → harness pipeline exits 0", function* () {
     const dir = tmpScenarioDir();
     const args = stubRunArgs(dir, { githubComment: 1 });
     const code = yield* runCommand(args);
     expect(code).toBe(EXIT_SUCCESS);
   });
 
-  itEffect("githubComment undefined → runScenarios called → exit 0", function* () {
+  itEffect("githubComment undefined → harness pipeline exits 0", function* () {
     const dir = tmpScenarioDir();
     const args = stubRunArgs(dir, { githubComment: undefined });
     const code = yield* runCommand(args);
     expect(code).toBe(EXIT_SUCCESS);
   });
 
-  itEffect("githubCommentArtifactUrl set → runScenarios called → exit 0", function* () {
+  itEffect("githubCommentArtifactUrl set → harness pipeline exits 0", function* () {
     const dir = tmpScenarioDir();
     const args = stubRunArgs(dir, { githubCommentArtifactUrl: "https://example.com/artifact" });
     const code = yield* runCommand(args);
     expect(code).toBe(EXIT_SUCCESS);
   });
 
-  itEffect("githubCommentArtifactUrl undefined → runScenarios called → exit 0", function* () {
+  itEffect("githubCommentArtifactUrl undefined → harness pipeline exits 0", function* () {
     const dir = tmpScenarioDir();
     const args = stubRunArgs(dir, { githubCommentArtifactUrl: undefined });
     const code = yield* runCommand(args);
     expect(code).toBe(EXIT_SUCCESS);
   });
 
-  itEffect("totalTimeoutMs set → runScenarios called → exit 0", function* () {
+  itEffect("totalTimeoutMs set → harness pipeline exits 0", function* () {
     const dir = tmpScenarioDir();
     const args = stubRunArgs(dir, { totalTimeoutMs: 60_000 });
     const code = yield* runCommand(args);
     expect(code).toBe(EXIT_SUCCESS);
   });
 
-  itEffect("totalTimeoutMs undefined → runScenarios called → exit 0", function* () {
+  itEffect("totalTimeoutMs undefined → harness pipeline exits 0", function* () {
     const dir = tmpScenarioDir();
     const args = stubRunArgs(dir, { totalTimeoutMs: undefined });
     const code = yield* runCommand(args);
@@ -781,16 +742,14 @@ describe("parseRunArgs logLevel each position in OR chain", () => {
 // ──────────────────────────────────────────────────────────────────────────────
 
 describe("main (yargs) option names and defaults", () => {
-  itEffect("--scenario-ids filters scenarios (run subcommand)", function* () {
+  itEffect("run subcommand accepts a harness input path", function* () {
     const dir = tmpScenarioDir();
     const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-si-"));
-    // --scenario-ids with a non-matching ID → no jobs → exit 0
     const code = yield* main([
       "run",
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--results", results,
       "--log-level", "error",
     ]);
@@ -805,7 +764,6 @@ describe("main (yargs) option names and defaults", () => {
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--github-comment", "1",
       "--results", results,
       "--log-level", "error",
@@ -821,7 +779,6 @@ describe("main (yargs) option names and defaults", () => {
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--github-comment-artifact-url", "https://example.com/art",
       "--results", results,
       "--log-level", "error",
@@ -837,7 +794,6 @@ describe("main (yargs) option names and defaults", () => {
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--total-timeout-ms", "60000",
       "--results", results,
       "--log-level", "error",
@@ -848,13 +804,11 @@ describe("main (yargs) option names and defaults", () => {
   itEffect("--emit-braintrust default false: no emitter created", function* () {
     const dir = tmpScenarioDir();
     const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-eb-"));
-    // Without --emit-braintrust, default is false
     const code = yield* main([
       "run",
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--results", results,
       "--log-level", "error",
     ]);
@@ -869,24 +823,7 @@ describe("main (yargs) option names and defaults", () => {
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--emit-promptfoo", STUB_PROMPTFOO_OUTPUT,
-      "--results", results,
-      "--log-level", "error",
-    ]);
-    expect(code).toBe(EXIT_SUCCESS);
-  });
-
-  itEffect("--runs default 1 (option resolves with number default)", function* () {
-    const dir = tmpScenarioDir();
-    const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-runs-"));
-    const code = yield* main([
-      "run",
-      dir,
-      "--runtime", "subprocess",
-      "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
-      "--runs", "1",
       "--results", results,
       "--log-level", "error",
     ]);
@@ -901,7 +838,6 @@ describe("main (yargs) option names and defaults", () => {
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--concurrency", "1",
       "--results", results,
       "--log-level", "debug",
@@ -917,7 +853,6 @@ describe("main (yargs) option names and defaults", () => {
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--results", results,
       "--log-level", "info",
     ]);
@@ -1081,14 +1016,11 @@ describe("main (yargs) option names and defaults", () => {
         dir,
         "--runtime", "docker",
         "--image", "cc-judge-nonexistent-image-xyz",
-        "--scenario-ids", NONEXISTENT_SCENARIO_ID,
         "--results", results,
         "--log-level", "error",
       ]),
       Effect.sync(restore),
     );
-    // Runner resolved (exit 2 is runner-resolution, but we gave an image)
-    // With the nonexistent-id filter no agent is started → exit 0
     expect(code).toBe(EXIT_SUCCESS);
   });
 
@@ -1100,7 +1032,6 @@ describe("main (yargs) option names and defaults", () => {
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--results", results,
       "--log-level", "error",
     ]);
@@ -1115,7 +1046,6 @@ describe("main (yargs) option names and defaults", () => {
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--judge-backend", "anthropic",
       "--results", results,
       "--log-level", "error",
@@ -1149,7 +1079,6 @@ describe("main (yargs) option names and defaults", () => {
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--results", results,
       "--log-level", "warn",
     ]);
@@ -1181,7 +1110,6 @@ describe("main (yargs) option names and defaults", () => {
       dir,
       "--runtime", "subprocess",
       "--bin", BIN_TRUE,
-      "--scenario-ids", NONEXISTENT_SCENARIO_ID,
       "--results", results,
       "--log-level", "error",
     ]);
@@ -1197,14 +1125,12 @@ describe("main (yargs) command dispatch edge cases", () => {
   itEffect("run command is dispatched (case `run` literal)", function* () {
     const dir = tmpScenarioDir();
     const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-dispatch-run-"));
-    // docker runtime, missing image → exits 2 via runner-resolution (not unknown command)
     const { chunks, restore } = installStderrCapture();
     const code = yield* Effect.ensuring(
       main(["run", dir, "--results", results, "--log-level", "error"]),
       Effect.sync(restore),
     );
-    expect(code).toBe(EXIT_RUNNER_RESOLUTION);
-    // Must NOT be the "unknown command" path
+    expect(code).toBe(EXIT_SUCCESS);
     expect(chunks.join("")).not.toContain("unknown command");
   });
 
@@ -1269,44 +1195,34 @@ function installStderrCapture(): { chunks: string[]; restore: () => void } {
 }
 
 describe("runCommand stderr messages", () => {
-  itEffect("writes `cc-judge: runner resolution failed:` with `docker: missing --image` cause", function* () {
-    const dir = tmpScenarioDir();
-    const args: RunCliArgs = baseArgs(dir);
-    const { chunks, restore } = installStderrCapture();
-    const code = yield* Effect.ensuring(runCommand(args), Effect.sync(restore));
-    const stderr = chunks.join("");
-    expect(code).toBe(EXIT_RUNNER_RESOLUTION);
-    expect(stderr).toContain("cc-judge: runner resolution failed:");
-    expect(stderr).toContain("docker: missing --image");
-  });
-
-  itEffect("writes `cc-judge: runner resolution failed:` with `subprocess: missing --bin` cause", function* () {
+  itEffect("writes `cc-judge: runtime resolution failed:` with `subprocess: missing --bin` cause", function* () {
     const dir = tmpScenarioDir();
     const args: RunCliArgs = { ...baseArgs(dir), runtime: "subprocess" };
     const { chunks, restore } = installStderrCapture();
     const code = yield* Effect.ensuring(runCommand(args), Effect.sync(restore));
     const stderr = chunks.join("");
     expect(code).toBe(EXIT_RUNNER_RESOLUTION);
-    expect(stderr).toContain("cc-judge: runner resolution failed:");
+    expect(stderr).toContain("cc-judge: runtime resolution failed:");
     expect(stderr).toContain("subprocess: missing --bin");
   });
 
-  itEffect("writes `cc-judge: load failed:` when scenario path does not exist", function* () {
+  itEffect("writes `cc-judge: harness run failed:` when harness loading fails", function* () {
+    mockRunHarnessShouldFail = true;
+    mockRunHarnessFailTag = "FileNotFound";
     const args: RunCliArgs = { ...baseArgs("/tmp"), scenarioPath: SCEN_PATH_BOGUS };
     const { chunks, restore } = installStderrCapture();
     const code = yield* Effect.ensuring(runCommand(args), Effect.sync(restore));
     const stderr = chunks.join("");
     expect(code).toBe(EXIT_LOAD_FAILURE);
-    expect(stderr).toContain("cc-judge: load failed:");
+    expect(stderr).toContain("cc-judge: harness run failed:");
     expect(stderr).toContain("FileNotFound");
+    mockRunHarnessShouldFail = false;
   });
 });
 
 // ---------------------------------------------------------------------------
-// Mock-based tests: capture opts passed to runScenarios from runCommand.
-// Kills ConditionalExpression, EqualityOperator, ObjectLiteral survivors on
-// lines 105, 116-121 by asserting that the spread conditionals actually
-// include or omit the optional fields.
+// Mock-based tests: capture opts passed to runPlannedHarnessPath from runCommand.
+// Kills the spread/option plumbing on the harness-backed run path.
 // ---------------------------------------------------------------------------
 
 const MOCK_SCENARIO_ID = "cc-judge-mock-sid-001";
@@ -1315,26 +1231,17 @@ const MOCK_ARTIFACT_URL = "https://example.com/artifact/42";
 const MOCK_TOTAL_TIMEOUT_MS = 120_000;
 const MOCK_LOG_LEVEL_ERROR = "error" as const;
 
-describe("runCommand passes optional opts to runScenarios (mock capture)", () => {
+describe("runCommand passes optional opts to the harness run path (mock capture)", () => {
   beforeEach(() => {
     capturedRunOpts = null;
-    capturedRunScenarios = null;
+    capturedRunPath = null;
   });
 
-  itEffect("scenarioIds are spread into opts when defined", function* () {
+  itEffect("passes the requested input path to the harness loader", function* () {
     const dir = tmpScenarioDir();
-    const args = stubRunArgs(dir, { scenarioIds: [MOCK_SCENARIO_ID] });
+    const args = stubRunArgs(dir);
     yield* runCommand(args);
-    expect(capturedRunOpts).not.toBeNull();
-    expect(capturedRunOpts!["scenarioIdFilter"]).toEqual([MOCK_SCENARIO_ID]);
-  });
-
-  itEffect("scenarioIds omitted from opts when undefined", function* () {
-    const dir = tmpScenarioDir();
-    const args = stubRunArgs(dir, { scenarioIds: undefined });
-    yield* runCommand(args);
-    expect(capturedRunOpts).not.toBeNull();
-    expect(capturedRunOpts!["scenarioIdFilter"]).toBeUndefined();
+    expect(capturedRunPath).toBe(dir);
   });
 
   itEffect("githubComment is spread into opts when defined", function* () {
@@ -1385,15 +1292,14 @@ describe("runCommand passes optional opts to runScenarios (mock capture)", () =>
     expect(capturedRunOpts!["totalTimeoutMs"]).toBeUndefined();
   });
 
-  itEffect("base fields (runner, judge, resultsDir, runsPerScenario, concurrency, logLevel, emitters) are always present", function* () {
+  itEffect("base fields (runtime, judge, resultsDir, concurrency, logLevel, emitters) are always present", function* () {
     const dir = tmpScenarioDir();
     const args = stubRunArgs(dir);
     yield* runCommand(args);
     expect(capturedRunOpts).not.toBeNull();
-    expect(capturedRunOpts!["runner"]).toBeDefined();
+    expect(capturedRunOpts!["runtime"]).toBeDefined();
     expect(capturedRunOpts!["judge"]).toBeDefined();
     expect(capturedRunOpts!["resultsDir"]).toBeDefined();
-    expect(capturedRunOpts!["runsPerScenario"]).toBeDefined();
     expect(capturedRunOpts!["concurrency"]).toBeDefined();
     expect(capturedRunOpts!["logLevel"]).toBe(MOCK_LOG_LEVEL_ERROR);
     expect(capturedRunOpts!["emitters"]).toBeDefined();
@@ -1401,7 +1307,7 @@ describe("runCommand passes optional opts to runScenarios (mock capture)", () =>
 });
 
 // ---------------------------------------------------------------------------
-// Mock-based tests: capture emitters passed to runScenarios from runCommand.
+// Mock-based tests: capture emitters passed to the harness pipeline from runCommand.
 // Kills buildObservability survivors (lines 59-68): BlockStatement,
 // ConditionalExpression, EqualityOperator, StringLiteral mutants.
 // ---------------------------------------------------------------------------
@@ -1657,31 +1563,31 @@ describe("scoreCommand buildObservability emitter composition (mock capture)", (
 });
 
 // ---------------------------------------------------------------------------
-// runCommand stderr: runScenarios failure path (line 125).
-// When runScenarios fails, the error message must contain the correct prefix.
+// runCommand stderr: harness run failure path.
+// When the harness run fails, the error message must contain the correct prefix.
 // Uses a module-level flag to make the mock return a failure.
 // ---------------------------------------------------------------------------
 
-describe("runCommand runScenarios failure stderr (mock)", () => {
+describe("runCommand harness failure stderr (mock)", () => {
   beforeEach(() => {
     capturedRunOpts = null;
-    mockRunScenariosShouldFail = false;
+    mockRunHarnessShouldFail = false;
   });
 
   afterEach(() => {
-    mockRunScenariosShouldFail = false;
+    mockRunHarnessShouldFail = false;
   });
 
-  itEffect("writes `cc-judge: runner resolution failed:` with _tag when runScenarios returns Left", function* () {
-    mockRunScenariosShouldFail = true;
-    mockRunScenariosFailTag = "NoRunnerConfigured";
+  itEffect("writes `cc-judge: harness run failed:` with _tag when the harness loader returns Left", function* () {
+    mockRunHarnessShouldFail = true;
+    mockRunHarnessFailTag = "ParseFailure";
     const dir = tmpScenarioDir();
     const args = stubRunArgs(dir);
     const { chunks, restore } = installStderrCapture();
     const code = yield* Effect.ensuring(runCommand(args), Effect.sync(restore));
     const stderr = chunks.join("");
     expect(code).toBe(EXIT_RUNNER_RESOLUTION);
-    expect(stderr).toContain("cc-judge: runner resolution failed:");
-    expect(stderr).toContain("NoRunnerConfigured");
+    expect(stderr).toContain("cc-judge: harness run failed:");
+    expect(stderr).toContain("ParseFailure");
   });
 });

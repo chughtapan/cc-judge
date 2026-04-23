@@ -13,18 +13,26 @@ import type {
   IssueSeverity,
   JudgmentBundle,
   Phase,
+  RunRequirements,
+  ScenarioId,
   TraceEvent,
   Turn,
   WorkspaceDiff,
 } from "../core/types.js";
 import {
   type JudgeResult,
-  type Scenario,
   JudgeResultSchema,
 } from "../core/schema.js";
 
+export interface JudgeTarget {
+  readonly scenarioId: ScenarioId;
+  readonly name: string;
+  readonly description: string;
+  readonly requirements: RunRequirements;
+}
+
 export interface JudgeInput {
-  readonly scenario: Scenario;
+  readonly target: JudgeTarget;
   readonly turns: ReadonlyArray<Turn>;
   readonly workspaceDiff?: WorkspaceDiff;
   readonly events?: ReadonlyArray<TraceEvent>;
@@ -56,7 +64,7 @@ const DEFAULT_PER_ATTEMPT_TIMEOUT_MS = 120_000;
 const DEFAULT_RETRY_SCHEDULE: ReadonlyArray<number> = [500, 1_500, 4_500];
 
 // What we ask the judge model to emit. Kept tight so parse errors are rare.
-export const JUDGE_SYSTEM_PROMPT = `You are a verdict-only evaluator. Read the scenario, the agent transcript, and the workspace diff; then emit a single JSON object and nothing else. Schema:
+export const JUDGE_SYSTEM_PROMPT = `You are a verdict-only evaluator. Read the evaluation target, the agent transcript, and the workspace diff; then emit a single JSON object and nothing else. Schema:
 {
   "pass": boolean,
   "reason": string,
@@ -64,7 +72,7 @@ export const JUDGE_SYSTEM_PROMPT = `You are a verdict-only evaluator. Read the s
   "overallSeverity": "minor" | "significant" | "critical" | null,
   "judgeConfidence": number (0-1)
 }
-Every validation check in the scenario is either met or not; list unmet checks as issues. If pass is true, issues may still list minor nits. overallSeverity is null when pass is true and no issues were listed, otherwise the most severe issue. Do not wrap the JSON in markdown fences.`;
+Every validation check in the evaluation target is either met or not; list unmet checks as issues. If pass is true, issues may still list minor nits. overallSeverity is null when pass is true and no issues were listed, otherwise the most severe issue. Do not wrap the JSON in markdown fences.`;
 
 function renderDiff(diff: WorkspaceDiff | undefined): string {
   if (diff === undefined || diff.changed.length === 0) return "(no workspace changes)";
@@ -116,15 +124,12 @@ function renderAgents(agents: ReadonlyArray<AgentRef>): string {
   return agents.map((a) => `- ${a.name} (${a.id})${a.role ? ` role=${a.role}` : ""}`).join("\n");
 }
 
-function bundleToScenario(bundle: JudgmentBundle): Scenario {
+function bundleToJudgeTarget(bundle: JudgmentBundle): JudgeTarget {
   return {
-    id: bundle.scenarioId,
+    scenarioId: bundle.scenarioId,
     name: bundle.name,
     description: bundle.description,
-    setupPrompt: "",
-    expectedBehavior: bundle.requirements.expectedBehavior,
-    validationChecks: bundle.requirements.validationChecks,
-    ...(bundle.requirements.judgeRubric !== undefined ? { judgeRubric: bundle.requirements.judgeRubric } : {}),
+    requirements: bundle.requirements,
   };
 }
 
@@ -183,7 +188,7 @@ export function bundleToJudgeInput(bundle: JudgmentBundle, abortSignal?: AbortSi
     agentOutcomes: bundle.outcomes,
   };
   return {
-    scenario: bundleToScenario(bundle),
+    target: bundleToJudgeTarget(bundle),
     turns: bundleTurnsToTurns(bundle),
     ...(bundle.workspaceDiff !== undefined ? { workspaceDiff: bundle.workspaceDiff } : {}),
     ...(events !== undefined ? { events } : {}),
@@ -203,12 +208,12 @@ export function judgeBundle(
 }
 
 function renderPrompt(input: JudgeInput): string {
-  const s = input.scenario;
-  const checks = s.validationChecks.map((c, i) => `${i + 1}. ${c}`).join("\n");
+  const target = input.target;
+  const checks = target.requirements.validationChecks.map((c, i) => `${i + 1}. ${c}`).join("\n");
   const sections: string[] = [
-    `# Scenario: ${s.name}`,
-    `Description: ${s.description}`,
-    `Expected behavior: ${s.expectedBehavior}`,
+    `# Evaluation target: ${target.name}`,
+    `Description: ${target.description}`,
+    `Expected behavior: ${target.requirements.expectedBehavior}`,
     "",
     "Validation checks (each must hold for pass=true):",
     checks,
@@ -541,7 +546,7 @@ export class AnthropicJudgeBackend implements JudgeBackend {
     const timeoutMs = this.#perAttemptTimeoutMs;
     const schedule = this.#retrySchedule;
     const basePrompt = this.#systemPrompt;
-    const rubric = (input.scenario as { judgeRubric?: string }).judgeRubric;
+    const rubric = input.target.requirements.judgeRubric;
     const effectivePrompt = rubric !== undefined && rubric.length > 0
       ? `${basePrompt}\n\n${rubric}`
       : basePrompt;

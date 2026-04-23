@@ -4,17 +4,6 @@
 import { Data } from "effect";
 import type { AgentId, ScenarioId } from "./types.js";
 
-export class LoadError extends Data.TaggedError("LoadError")<{
-  readonly cause: LoadErrorCause;
-}> {}
-
-export type LoadErrorCause =
-  | { readonly _tag: "FileNotFound"; readonly path: string }
-  | { readonly _tag: "GlobNoMatches"; readonly pattern: string }
-  | { readonly _tag: "ParseFailure"; readonly path: string; readonly message: string }
-  | { readonly _tag: "SchemaInvalid"; readonly path: string; readonly errors: ReadonlyArray<string> }
-  | { readonly _tag: "DuplicateId"; readonly id: ScenarioId; readonly paths: readonly [string, string] };
-
 export class AgentStartError extends Data.TaggedError("AgentStartError")<{
   readonly scenarioId: ScenarioId;
   readonly agentId?: AgentId;
@@ -101,8 +90,7 @@ export class RunnerResolutionError extends Data.TaggedError("RunnerResolutionErr
 }> {}
 
 export type RunnerResolutionCause =
-  | { readonly _tag: "NoRunnerConfigured" }
-  | { readonly _tag: "InvalidRuntime"; readonly value: string };
+  { readonly _tag: "InvalidRuntime"; readonly value: string };
 
 // Tag constants. Identity-mapped objects over the `_tag` union members;
 // the mapped-type `satisfies` forces value == key at the type level, so a
@@ -112,14 +100,6 @@ export const ERROR_TAG = {
   AgentStartError: "AgentStartError",
   AgentRunTimeoutError: "AgentRunTimeoutError",
 } as const;
-
-export const LOAD_ERROR_CAUSE = {
-  FileNotFound: "FileNotFound",
-  GlobNoMatches: "GlobNoMatches",
-  ParseFailure: "ParseFailure",
-  SchemaInvalid: "SchemaInvalid",
-  DuplicateId: "DuplicateId",
-} as const satisfies { readonly [K in LoadErrorCause["_tag"]]: K };
 
 export const AGENT_START_CAUSE = {
   BuildContextMissing: "BuildContextMissing",
