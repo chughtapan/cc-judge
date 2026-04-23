@@ -1,14 +1,19 @@
 // CLI entrypoints: `cc-judge run`, `cc-judge score`, and `cc-judge inspect`.
 // Built on yargs. Exit codes: 0 all-pass, 1 any-fail, 2 fatal.
 
-import { Effect } from "effect";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import * as path from "node:path";
+import { Effect } from "effect";
+import { glob as doGlob } from "glob";
+import * as YAML from "yaml";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { scenarioLoader } from "../core/scenario.js";
-import type { Scenario } from "../core/schema.js";
-import type { Trace } from "../core/schema.js";
+import type { Scenario, Trace } from "../core/schema.js";
+import { RunnerResolutionError } from "../core/errors.js";
+import { absurd } from "../core/types.js";
+import { BraintrustEmitter, PromptfooEmitter, type ObservabilityEmitter } from "../emit/observability.js";
+import { getTraceAdapter, type TraceFormat } from "../emit/trace-adapter.js";
 import { AnthropicJudgeBackend, JUDGE_SYSTEM_PROMPT } from "../judge/index.js";
 import {
   DockerRunner,
@@ -18,14 +23,10 @@ import {
   type AgentRunner,
   type AgentRuntime,
 } from "../runner/index.js";
-import { BraintrustEmitter, PromptfooEmitter, type ObservabilityEmitter } from "../emit/observability.js";
-import { getTraceAdapter, type TraceFormat } from "../emit/trace-adapter.js";
-import { glob as doGlob } from "glob";
-import { RunnerResolutionError } from "../core/errors.js";
-import { runScenarios, scoreTraces } from "./pipeline.js";
-import { inspectRun, type InspectErrorCause } from "./inspect.js";
-import { absurd } from "../core/types.js";
 import { runPlannedHarnessPath } from "../plans/compiler.js";
+import { ensureJudgeReady } from "./judge-preflight.js";
+import { inspectRun, type InspectErrorCause } from "./inspect.js";
+import { runScenarios, scoreTraces } from "./pipeline.js";
 
 export type CliExitCode = 0 | 1 | 2;
 
@@ -64,21 +65,18 @@ export interface ScoreCliArgs {
   readonly emitPromptfoo?: string;
 }
 
-interface RunPlansCliArgs {
-  readonly planPath: string;
-  readonly runtime: "docker" | "subprocess";
-  readonly bin?: string;
-  readonly judge: string;
-  readonly judgeBackend: string;
-  readonly results: string;
-  readonly githubComment?: number;
-  readonly githubCommentArtifactUrl?: string;
-  readonly concurrency: number;
-  readonly logLevel: "debug" | "info" | "warn" | "error";
-  readonly totalTimeoutMs?: number;
-  readonly emitBraintrust: boolean;
-  readonly emitPromptfoo?: string;
-}
+type RunInputKind = "scenario" | "harness";
+
+type RunInputClassification =
+  | { readonly kind: RunInputKind }
+  | { readonly kind: "mixed" }
+  | { readonly kind: "missing" }
+  | { readonly kind: "glob-no-matches" }
+  | {
+      readonly kind: "unreadable";
+      readonly path: string;
+      readonly message: string;
+    };
 
 function buildObservability(
   emitBraintrust: boolean,
@@ -102,24 +100,30 @@ function buildRunner(args: RunCliArgs): Effect.Effect<AgentRunner, RunnerResolut
   if (args.runtime === "subprocess") {
     if (args.bin === undefined) {
       return Effect.fail(
-        new RunnerResolutionError({ cause: { _tag: "InvalidRuntime", value: "subprocess: missing --bin" } }),
+        new RunnerResolutionError({
+          cause: { _tag: "InvalidRuntime", value: "subprocess: missing --bin" },
+        }),
       );
     }
     return Effect.succeed(new SubprocessRunner({ bin: args.bin }));
   }
   if (args.image === undefined) {
     return Effect.fail(
-      new RunnerResolutionError({ cause: { _tag: "InvalidRuntime", value: "docker: missing --image" } }),
+      new RunnerResolutionError({
+        cause: { _tag: "InvalidRuntime", value: "docker: missing --image" },
+      }),
     );
   }
   return Effect.succeed(new DockerRunner({ image: args.image }));
 }
 
-function buildRuntime(args: RunPlansCliArgs): Effect.Effect<AgentRuntime, RunnerResolutionError, never> {
+function buildRuntime(args: RunCliArgs): Effect.Effect<AgentRuntime, RunnerResolutionError, never> {
   if (args.runtime === "subprocess") {
     if (args.bin === undefined) {
       return Effect.fail(
-        new RunnerResolutionError({ cause: { _tag: "InvalidRuntime", value: "subprocess: missing --bin" } }),
+        new RunnerResolutionError({
+          cause: { _tag: "InvalidRuntime", value: "subprocess: missing --bin" },
+        }),
       );
     }
     return Effect.succeed(new SubprocessRuntime({ bin: args.bin }));
@@ -127,7 +131,77 @@ function buildRuntime(args: RunPlansCliArgs): Effect.Effect<AgentRuntime, Runner
   return Effect.succeed(new DockerRuntime());
 }
 
-export function runCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, never> {
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function resolveYamlInputFiles(pathOrGlob: string): ReadonlyArray<string> {
+  const isDir = (() => {
+    try {
+      return statSync(pathOrGlob).isDirectory();
+    } catch (error) {
+      void error;
+      return false;
+    }
+  })();
+  if (isDir) {
+    return readdirSync(pathOrGlob)
+      .filter((entry) => entry.endsWith(".yaml") || entry.endsWith(".yml") || entry.endsWith(".json"))
+      .map((entry) => path.join(pathOrGlob, entry))
+      .sort();
+  }
+  if (/[*?\[\]{}]/.test(pathOrGlob)) {
+    return doGlob.sync(pathOrGlob).sort();
+  }
+  return [pathOrGlob];
+}
+
+function classifyRunInputPath(pathOrGlob: string): RunInputClassification {
+  const files = resolveYamlInputFiles(pathOrGlob);
+  if (files.length === 0) {
+    return /[*?\[\]{}]/.test(pathOrGlob)
+      ? { kind: "glob-no-matches" }
+      : { kind: "missing" };
+  }
+  let sawHarness = false;
+  let sawScenario = false;
+  for (const filePath of files) {
+    try {
+      const parsed = YAML.parse(readFileSync(filePath, "utf8"));
+      if (isRecord(parsed) && "harness" in parsed) {
+        sawHarness = true;
+      } else {
+        sawScenario = true;
+      }
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        (error as { readonly code?: string }).code === "ENOENT"
+      ) {
+        return { kind: "missing" };
+      }
+      return {
+        kind: "unreadable",
+        path: filePath,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (sawHarness && sawScenario) {
+      return { kind: "mixed" };
+    }
+  }
+  return { kind: sawHarness ? "harness" : "scenario" };
+}
+
+function printReportSummary(
+  passed: number,
+  total: number,
+): void {
+  process.stdout.write(`cc-judge: ${String(passed)}/${String(total)} passed\n`);
+}
+
+function runLegacyScenarioCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, never> {
   return Effect.gen(function* () {
     const loadRes = yield* Effect.either(scenarioLoader.loadFromPath(args.scenarioPath));
     if (loadRes._tag === "Left") {
@@ -142,12 +216,16 @@ export function runCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, 
       process.stderr.write(`cc-judge: runner resolution failed: ${detail}\n`);
       return 2 as CliExitCode;
     }
-    const runner = runnerRes.right;
+    const preflightFailure = ensureJudgeReady(args.judgeBackend);
+    if (preflightFailure !== null) {
+      process.stderr.write(`cc-judge: ${preflightFailure}\n`);
+      return 2 as CliExitCode;
+    }
     const judge = new AnthropicJudgeBackend({ model: args.judge });
     const emitters = buildObservability(args.emitBraintrust, args.emitPromptfoo);
     const runRes = yield* Effect.either(
       runScenarios(scenarios, {
-        runner,
+        runner: runnerRes.right,
         judge,
         resultsDir: args.results,
         runsPerScenario: args.runs,
@@ -166,16 +244,87 @@ export function runCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, 
       process.stderr.write(`cc-judge: runner resolution failed: ${runRes.left.cause._tag}\n`);
       return 2 as CliExitCode;
     }
-    const report = runRes.right;
-    process.stdout.write(
-      `cc-judge: ${String(report.summary.passed)}/${String(report.summary.total)} passed\n`,
+    printReportSummary(runRes.right.summary.passed, runRes.right.summary.total);
+    return (runRes.right.summary.failed === 0 ? 0 : 1) as CliExitCode;
+  });
+}
+
+function runHarnessPlanCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, never> {
+  return Effect.gen(function* () {
+    const runtimeRes = yield* Effect.either(buildRuntime(args));
+    if (runtimeRes._tag === "Left") {
+      const cause = runtimeRes.left.cause;
+      const detail = cause._tag === "InvalidRuntime" ? cause.value : cause._tag;
+      process.stderr.write(`cc-judge: runtime resolution failed: ${detail}\n`);
+      return 2 as CliExitCode;
+    }
+    const preflightFailure = ensureJudgeReady(args.judgeBackend);
+    if (preflightFailure !== null) {
+      process.stderr.write(`cc-judge: ${preflightFailure}\n`);
+      return 2 as CliExitCode;
+    }
+    const judge = new AnthropicJudgeBackend({ model: args.judge });
+    const emitters = buildObservability(args.emitBraintrust, args.emitPromptfoo);
+    const runRes = yield* Effect.either(
+      runPlannedHarnessPath(args.scenarioPath, {
+        runtime: runtimeRes.right,
+        judge,
+        resultsDir: args.results,
+        concurrency: args.concurrency,
+        emitters,
+        logLevel: args.logLevel,
+        ...(args.githubComment !== undefined ? { githubComment: args.githubComment } : {}),
+        ...(args.githubCommentArtifactUrl !== undefined
+          ? { githubCommentArtifactUrl: args.githubCommentArtifactUrl }
+          : {}),
+        ...(args.totalTimeoutMs !== undefined ? { totalTimeoutMs: args.totalTimeoutMs } : {}),
+      }),
     );
-    return (report.summary.failed === 0 ? 0 : 1) as CliExitCode;
+    if (runRes._tag === "Left") {
+      const cause = runRes.left.cause;
+      process.stderr.write(`cc-judge: harness run failed: ${cause._tag}\n`);
+      return 2 as CliExitCode;
+    }
+    printReportSummary(runRes.right.summary.passed, runRes.right.summary.total);
+    return (runRes.right.summary.failed === 0 ? 0 : 1) as CliExitCode;
+  });
+}
+
+export function runCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, never> {
+  return Effect.gen(function* () {
+    const classification = classifyRunInputPath(args.scenarioPath);
+    switch (classification.kind) {
+      case "harness":
+        return yield* runHarnessPlanCommand(args);
+      case "scenario":
+        return yield* runLegacyScenarioCommand(args);
+      case "mixed":
+        process.stderr.write("cc-judge: run path contains mixed legacy scenarios and harness plans\n");
+        return 2 as CliExitCode;
+      case "missing":
+        process.stderr.write("cc-judge: load failed: FileNotFound\n");
+        return 2 as CliExitCode;
+      case "glob-no-matches":
+        process.stderr.write("cc-judge: load failed: GlobNoMatches\n");
+        return 2 as CliExitCode;
+      case "unreadable":
+        process.stderr.write(
+          `cc-judge: run input parse failed for ${classification.path}: ${classification.message}\n`,
+        );
+        return 2 as CliExitCode;
+      default:
+        return absurd(classification);
+    }
   });
 }
 
 export function scoreCommand(args: ScoreCliArgs): Effect.Effect<CliExitCode, never, never> {
   return Effect.gen(function* () {
+    const preflightFailure = ensureJudgeReady(args.judgeBackend);
+    if (preflightFailure !== null) {
+      process.stderr.write(`cc-judge: ${preflightFailure}\n`);
+      return 2 as CliExitCode;
+    }
     const adapter = getTraceAdapter(args.traceFormat);
     const files = resolveTraceFiles(args.tracesPath);
     if (files.length === 0) {
@@ -183,18 +332,20 @@ export function scoreCommand(args: ScoreCliArgs): Effect.Effect<CliExitCode, nev
       return 2 as CliExitCode;
     }
     const traces: Trace[] = [];
-    for (const f of files) {
-      const source = readFileSync(f, "utf8");
-      const decoded = yield* Effect.either(adapter.decode(source, f));
+    for (const filePath of files) {
+      const source = readFileSync(filePath, "utf8");
+      const decoded = yield* Effect.either(adapter.decode(source, filePath));
       if (decoded._tag === "Left") {
         process.stderr.write(
-          `cc-judge: trace decode failed for ${f}: ${decoded.left.cause._tag}\n`,
+          `cc-judge: trace decode failed for ${filePath}: ${decoded.left.cause._tag}\n`,
         );
         continue;
       }
       traces.push(decoded.right);
     }
-    if (traces.length === 0) return 2 as CliExitCode;
+    if (traces.length === 0) {
+      return 2 as CliExitCode;
+    }
     const rubric = args.judgeRubric !== undefined
       ? readFileSync(args.judgeRubric, "utf8")
       : undefined;
@@ -216,82 +367,24 @@ export function scoreCommand(args: ScoreCliArgs): Effect.Effect<CliExitCode, nev
         : {}),
       ...(args.totalTimeoutMs !== undefined ? { totalTimeoutMs: args.totalTimeoutMs } : {}),
     });
-    process.stdout.write(
-      `cc-judge: ${String(report.summary.passed)}/${String(report.summary.total)} passed\n`,
-    );
-    return (report.summary.failed === 0 ? 0 : 1) as CliExitCode;
-  });
-}
-
-function parseRunPlansArgs(raw: unknown): RunPlansCliArgs {
-  const r = asObject(raw);
-  const runtime = r["runtime"] === "subprocess" ? "subprocess" : "docker";
-  const logLevel = (r["logLevel"] === "debug" || r["logLevel"] === "info" || r["logLevel"] === "warn" || r["logLevel"] === "error")
-    ? r["logLevel"]
-    : "info";
-  return {
-    planPath: typeof r["planPath"] === "string" ? r["planPath"] : "",
-    runtime,
-    ...(typeof r["bin"] === "string" ? { bin: r["bin"] } : {}),
-    judge: typeof r["judge"] === "string" ? r["judge"] : "claude-opus-4-7",
-    judgeBackend: typeof r["judgeBackend"] === "string" ? r["judgeBackend"] : "anthropic",
-    results: typeof r["results"] === "string" ? r["results"] : "./eval-results",
-    ...(typeof r["githubComment"] === "number" ? { githubComment: r["githubComment"] } : {}),
-    ...(typeof r["githubCommentArtifactUrl"] === "string"
-      ? { githubCommentArtifactUrl: r["githubCommentArtifactUrl"] }
-      : {}),
-    concurrency: typeof r["concurrency"] === "number" ? r["concurrency"] : 1,
-    logLevel,
-    ...(typeof r["totalTimeoutMs"] === "number" ? { totalTimeoutMs: r["totalTimeoutMs"] } : {}),
-    emitBraintrust: r["emitBraintrust"] === true,
-    ...(typeof r["emitPromptfoo"] === "string" ? { emitPromptfoo: r["emitPromptfoo"] } : {}),
-  };
-}
-
-function runPlansCommand(args: RunPlansCliArgs): Effect.Effect<CliExitCode, never, never> {
-  return Effect.gen(function* () {
-    const runtimeRes = yield* Effect.either(buildRuntime(args));
-    if (runtimeRes._tag === "Left") {
-      const cause = runtimeRes.left.cause;
-      const detail = cause._tag === "InvalidRuntime" ? cause.value : cause._tag;
-      process.stderr.write(`cc-judge: runtime resolution failed: ${detail}\n`);
-      return 2 as CliExitCode;
-    }
-    const judge = new AnthropicJudgeBackend({ model: args.judge });
-    const emitters = buildObservability(args.emitBraintrust, args.emitPromptfoo);
-    const runRes = yield* Effect.either(
-      runPlannedHarnessPath(args.planPath, {
-        runtime: runtimeRes.right,
-        judge,
-        resultsDir: args.results,
-        concurrency: args.concurrency,
-        emitters,
-        logLevel: args.logLevel,
-        ...(args.githubComment !== undefined ? { githubComment: args.githubComment } : {}),
-        ...(args.githubCommentArtifactUrl !== undefined
-          ? { githubCommentArtifactUrl: args.githubCommentArtifactUrl }
-          : {}),
-        ...(args.totalTimeoutMs !== undefined ? { totalTimeoutMs: args.totalTimeoutMs } : {}),
-      }),
-    );
-    if (runRes._tag === "Left") {
-      process.stderr.write(`cc-judge: planned-harness load failed: ${runRes.left.cause._tag}\n`);
-      return 2 as CliExitCode;
-    }
-    const report = runRes.right;
-    process.stdout.write(
-      `cc-judge: ${String(report.summary.passed)}/${String(report.summary.total)} passed\n`,
-    );
+    printReportSummary(report.summary.passed, report.summary.total);
     return (report.summary.failed === 0 ? 0 : 1) as CliExitCode;
   });
 }
 
 function resolveTraceFiles(pathOrGlob: string): ReadonlyArray<string> {
-  const isDir = (() => { try { return statSync(pathOrGlob).isDirectory(); } catch (e) { void e; return false; } })();
+  const isDir = (() => {
+    try {
+      return statSync(pathOrGlob).isDirectory();
+    } catch (error) {
+      void error;
+      return false;
+    }
+  })();
   if (isDir) {
     return readdirSync(pathOrGlob)
-      .filter((f) => f.endsWith(".json") || f.endsWith(".yaml") || f.endsWith(".yml"))
-      .map((f) => path.join(pathOrGlob, f))
+      .filter((entry) => entry.endsWith(".json") || entry.endsWith(".yaml") || entry.endsWith(".yml"))
+      .map((entry) => path.join(pathOrGlob, entry))
       .sort();
   }
   if (/[*?\[\]{}]/.test(pathOrGlob)) {
@@ -305,69 +398,85 @@ interface YargsParsed {
 }
 
 function asObject(raw: unknown): YargsParsed {
-  if (typeof raw !== "object" || raw === null) return {};
-  const out: { [k: string]: unknown } = {};
-  for (const [k, v] of Object.entries(raw)) out[k] = v;
+  if (typeof raw !== "object" || raw === null) {
+    return {};
+  }
+  const out: { [key: string]: unknown } = {};
+  for (const [key, value] of Object.entries(raw)) {
+    out[key] = value;
+  }
   return out;
 }
 
 export function parseRunArgs(raw: unknown): RunCliArgs {
-  const r = asObject(raw);
-  const scenarioPath = typeof r["scenario"] === "string" ? r["scenario"] : "";
-  const runtime = r["runtime"] === "subprocess" ? "subprocess" : "docker";
-  const logLevel = (r["logLevel"] === "debug" || r["logLevel"] === "info" || r["logLevel"] === "warn" || r["logLevel"] === "error")
-    ? r["logLevel"]
+  const record = asObject(raw);
+  const scenarioPath = typeof record["input"] === "string"
+    ? record["input"]
+    : typeof record["scenario"] === "string"
+      ? record["scenario"]
+      : "";
+  const runtime = record["runtime"] === "subprocess" ? "subprocess" : "docker";
+  const logLevel = (
+    record["logLevel"] === "debug" ||
+    record["logLevel"] === "info" ||
+    record["logLevel"] === "warn" ||
+    record["logLevel"] === "error"
+  )
+    ? record["logLevel"]
     : "info";
   return {
     scenarioPath,
     runtime,
-    ...(typeof r["image"] === "string" ? { image: r["image"] } : {}),
-    ...(typeof r["bin"] === "string" ? { bin: r["bin"] } : {}),
-    judge: typeof r["judge"] === "string" ? r["judge"] : "claude-opus-4-7",
-    judgeBackend: typeof r["judgeBackend"] === "string" ? r["judgeBackend"] : "anthropic",
-    runs: typeof r["runs"] === "number" ? r["runs"] : 1,
-    ...(Array.isArray(r["scenarioIds"]) ? { scenarioIds: r["scenarioIds"] as ReadonlyArray<string> } : {}),
-    results: typeof r["results"] === "string" ? r["results"] : "./eval-results",
-    ...(typeof r["githubComment"] === "number" ? { githubComment: r["githubComment"] } : {}),
-    ...(typeof r["githubCommentArtifactUrl"] === "string"
-      ? { githubCommentArtifactUrl: r["githubCommentArtifactUrl"] }
+    ...(typeof record["image"] === "string" ? { image: record["image"] } : {}),
+    ...(typeof record["bin"] === "string" ? { bin: record["bin"] } : {}),
+    judge: typeof record["judge"] === "string" ? record["judge"] : "claude-opus-4-7",
+    judgeBackend: typeof record["judgeBackend"] === "string" ? record["judgeBackend"] : "anthropic",
+    runs: typeof record["runs"] === "number" ? record["runs"] : 1,
+    ...(Array.isArray(record["scenarioIds"])
+      ? { scenarioIds: record["scenarioIds"] as ReadonlyArray<string> }
       : {}),
-    concurrency: typeof r["concurrency"] === "number" ? r["concurrency"] : 1,
+    results: typeof record["results"] === "string" ? record["results"] : "./eval-results",
+    ...(typeof record["githubComment"] === "number" ? { githubComment: record["githubComment"] } : {}),
+    ...(typeof record["githubCommentArtifactUrl"] === "string"
+      ? { githubCommentArtifactUrl: record["githubCommentArtifactUrl"] }
+      : {}),
+    concurrency: typeof record["concurrency"] === "number" ? record["concurrency"] : 1,
     logLevel,
-    ...(typeof r["totalTimeoutMs"] === "number" ? { totalTimeoutMs: r["totalTimeoutMs"] } : {}),
-    emitBraintrust: r["emitBraintrust"] === true,
-    ...(typeof r["emitPromptfoo"] === "string" ? { emitPromptfoo: r["emitPromptfoo"] } : {}),
+    ...(typeof record["totalTimeoutMs"] === "number" ? { totalTimeoutMs: record["totalTimeoutMs"] } : {}),
+    emitBraintrust: record["emitBraintrust"] === true,
+    ...(typeof record["emitPromptfoo"] === "string" ? { emitPromptfoo: record["emitPromptfoo"] } : {}),
   };
 }
 
 export function parseScoreArgs(raw: unknown): ScoreCliArgs {
-  const r = asObject(raw);
-  const traceFormat = r["traceFormat"] === "otel" ? "otel" : "canonical";
-  const logLevel = (r["logLevel"] === "debug" || r["logLevel"] === "info" || r["logLevel"] === "warn" || r["logLevel"] === "error")
-    ? r["logLevel"]
+  const record = asObject(raw);
+  const traceFormat = record["traceFormat"] === "otel" ? "otel" : "canonical";
+  const logLevel = (
+    record["logLevel"] === "debug" ||
+    record["logLevel"] === "info" ||
+    record["logLevel"] === "warn" ||
+    record["logLevel"] === "error"
+  )
+    ? record["logLevel"]
     : "info";
   return {
-    tracesPath: typeof r["traces"] === "string" ? r["traces"] : "",
+    tracesPath: typeof record["traces"] === "string" ? record["traces"] : "",
     traceFormat: traceFormat as TraceFormat,
-    judge: typeof r["judge"] === "string" ? r["judge"] : "claude-opus-4-7",
-    judgeBackend: typeof r["judgeBackend"] === "string" ? r["judgeBackend"] : "anthropic",
-    ...(typeof r["judgeRubric"] === "string" ? { judgeRubric: r["judgeRubric"] } : {}),
-    results: typeof r["results"] === "string" ? r["results"] : "./eval-results",
-    ...(typeof r["githubComment"] === "number" ? { githubComment: r["githubComment"] } : {}),
-    ...(typeof r["githubCommentArtifactUrl"] === "string"
-      ? { githubCommentArtifactUrl: r["githubCommentArtifactUrl"] }
+    judge: typeof record["judge"] === "string" ? record["judge"] : "claude-opus-4-7",
+    judgeBackend: typeof record["judgeBackend"] === "string" ? record["judgeBackend"] : "anthropic",
+    ...(typeof record["judgeRubric"] === "string" ? { judgeRubric: record["judgeRubric"] } : {}),
+    results: typeof record["results"] === "string" ? record["results"] : "./eval-results",
+    ...(typeof record["githubComment"] === "number" ? { githubComment: record["githubComment"] } : {}),
+    ...(typeof record["githubCommentArtifactUrl"] === "string"
+      ? { githubCommentArtifactUrl: record["githubCommentArtifactUrl"] }
       : {}),
-    concurrency: typeof r["concurrency"] === "number" ? r["concurrency"] : 1,
+    concurrency: typeof record["concurrency"] === "number" ? record["concurrency"] : 1,
     logLevel,
-    ...(typeof r["totalTimeoutMs"] === "number" ? { totalTimeoutMs: r["totalTimeoutMs"] } : {}),
-    emitBraintrust: r["emitBraintrust"] === true,
-    ...(typeof r["emitPromptfoo"] === "string" ? { emitPromptfoo: r["emitPromptfoo"] } : {}),
+    ...(typeof record["totalTimeoutMs"] === "number" ? { totalTimeoutMs: record["totalTimeoutMs"] } : {}),
+    emitBraintrust: record["emitBraintrust"] === true,
+    ...(typeof record["emitPromptfoo"] === "string" ? { emitPromptfoo: record["emitPromptfoo"] } : {}),
   };
 }
-
-// ---------------------------------------------------------------------------
-// inspect subcommand — `cc-judge inspect <runId>`.
-// ---------------------------------------------------------------------------
 
 export interface InspectCliArgs {
   readonly runId: string;
@@ -375,10 +484,10 @@ export interface InspectCliArgs {
 }
 
 export function parseInspectArgs(raw: unknown): InspectCliArgs {
-  const r = asObject(raw);
+  const record = asObject(raw);
   return {
-    runId: typeof r["runId"] === "string" ? r["runId"] : "",
-    results: typeof r["results"] === "string" ? r["results"] : "./eval-results",
+    runId: typeof record["runId"] === "string" ? record["runId"] : "",
+    results: typeof record["results"] === "string" ? record["results"] : "./eval-results",
   };
 }
 
@@ -408,9 +517,9 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
   return Effect.suspend(() => {
     const parsed = yargs(argv.slice())
       .scriptName("cc-judge")
-      .command("run <scenario>", "Run scenarios", (y) =>
-        y
-          .positional("scenario", { type: "string", demandOption: true })
+      .command("run <input>", "Run scenarios or harness-backed plans", (yargsBuilder) =>
+        yargsBuilder
+          .positional("input", { type: "string", demandOption: true })
           .option("runtime", { choices: ["docker", "subprocess"] as const, default: "docker" })
           .option("image", { type: "string" })
           .option("bin", { type: "string" })
@@ -427,29 +536,16 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
           .option("emit-braintrust", { type: "boolean", default: false })
           .option("emit-promptfoo", { type: "string" }),
       )
-      .command("run-plans <planPath>", "Run planned harness documents", (y) =>
-        y
-          .positional("planPath", { type: "string", demandOption: true })
-          .option("runtime", { choices: ["docker", "subprocess"] as const, default: "docker" })
-          .option("bin", { type: "string" })
-          .option("judge", { type: "string", default: "claude-opus-4-7" })
-          .option("judge-backend", { type: "string", default: "anthropic" })
-          .option("results", { type: "string", default: "./eval-results" })
-          .option("github-comment", { type: "number" })
-          .option("github-comment-artifact-url", { type: "string" })
-          .option("concurrency", { type: "number", default: 1 })
-          .option("log-level", { choices: ["debug", "info", "warn", "error"] as const, default: "info" })
-          .option("total-timeout-ms", { type: "number" })
-          .option("emit-braintrust", { type: "boolean", default: false })
-          .option("emit-promptfoo", { type: "string" }),
-      )
-      .command("score <traces>", "Score traces", (y) =>
-        y
+      .command("score <traces>", "Score traces", (yargsBuilder) =>
+        yargsBuilder
           .positional("traces", { type: "string", demandOption: true })
           .option("trace-format", { choices: ["canonical", "otel"] as const, default: "canonical" })
           .option("judge", { type: "string", default: "claude-opus-4-7" })
           .option("judge-backend", { type: "string", default: "anthropic" })
-          .option("judge-rubric", { type: "string", describe: "Path to a rubric file appended to the judge system prompt" })
+          .option("judge-rubric", {
+            type: "string",
+            describe: "Path to a rubric file appended to the judge system prompt",
+          })
           .option("results", { type: "string", default: "./eval-results" })
           .option("github-comment", { type: "number" })
           .option("github-comment-artifact-url", { type: "string" })
@@ -459,8 +555,8 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
           .option("emit-braintrust", { type: "boolean", default: false })
           .option("emit-promptfoo", { type: "string" }),
       )
-      .command("inspect <runId>", "Inspect a run's WAL timeline", (y) =>
-        y
+      .command("inspect <runId>", "Inspect a run's WAL timeline", (yargsBuilder) =>
+        yargsBuilder
           .positional("runId", { type: "string", demandOption: true })
           .option("results", { type: "string", default: "./eval-results" }),
       )
@@ -473,14 +569,12 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
     switch (command) {
       case "run":
         return runCommand(parseRunArgs(parsed));
-      case "run-plans":
-        return runPlansCommand(parseRunPlansArgs(parsed));
       case "score":
         return scoreCommand(parseScoreArgs(parsed));
       case "inspect":
         return inspectCommand(parseInspectArgs(parsed));
       default:
-        process.stderr.write(`cc-judge: unknown command\n`);
+        process.stderr.write("cc-judge: unknown command\n");
         return Effect.succeed(2 as CliExitCode);
     }
   });

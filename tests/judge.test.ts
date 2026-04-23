@@ -22,6 +22,7 @@ const CONFIDENCE_TOO_LOW = -0.5;
 const DIFF_CONTENT = "new-file-contents";
 // Short timeout for failure-path tests to avoid 120-second default hang.
 const ATTEMPT_TIMEOUT_MS = 500;
+const HANGING_STEP = Symbol("hanging-step");
 const STRUCTURED_PASS_VERDICT = {
   pass: true,
   reason: REASON_PASS,
@@ -37,10 +38,15 @@ const STRUCTURED_PASS_VERDICT = {
 let nextMessageSequence: ReadonlyArray<ReadonlyArray<unknown>> = [];
 let attemptIndex = 0;
 const capturedPrompts: string[] = [];
+const capturedAbortControllers: AbortController[] = [];
+let iteratorReturnCount = 0;
 
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
-  query: vi.fn((args: { prompt: string }) => {
+  query: vi.fn((args: { prompt: string; options?: { abortController?: AbortController } }) => {
     capturedPrompts.push(args.prompt);
+    if (args.options?.abortController !== undefined) {
+      capturedAbortControllers.push(args.options.abortController);
+    }
     const messages = nextMessageSequence[attemptIndex] ?? [];
     attemptIndex += 1;
     return {
@@ -51,8 +57,15 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
             if (i < messages.length) {
               const value = messages[i];
               i += 1;
+              if (value === HANGING_STEP) {
+                return new Promise(() => undefined);
+              }
               return Promise.resolve({ value, done: false });
             }
+            return Promise.resolve({ value: undefined, done: true });
+          },
+          return: () => {
+            iteratorReturnCount += 1;
             return Promise.resolve({ value: undefined, done: true });
           },
         };
@@ -123,6 +136,8 @@ function input(diff?: WorkspaceDiff): JudgeInput {
 
 beforeEach(() => {
   setAttemptsToSequence([]);
+  capturedAbortControllers.length = 0;
+  iteratorReturnCount = 0;
 });
 
 describe("AnthropicJudgeBackend", () => {
@@ -265,24 +280,36 @@ describe("AnthropicJudgeBackend", () => {
     expect(result.reason).toContain("MalformedJson");
   }, 10_000);
 
-  itEffect("retries after a transient error message and succeeds on 2nd attempt", function* () {
-    const ok = [
-      successResultMessage("", {
-        pass: true,
-        reason: REASON_PASS,
-        issues: [],
-        overallSeverity: null,
-        judgeConfidence: CONFIDENCE_MID,
-      }),
-    ];
-    setAttemptsToSequence([[errorResultMessage(["transient"], "error_during_execution")], ok]);
+  itEffect("fails fast on ResultError instead of retrying explicit Claude failures", function* () {
+    setAttemptsToSequence([
+      [errorResultMessage(["spending cap reached"], "error_during_execution")],
+      [successResultMessage("", STRUCTURED_PASS_VERDICT)],
+    ]);
     const backend = new AnthropicJudgeBackend({
       retrySchedule: [1],
       perAttemptTimeoutMs: 500,
     });
     const result = yield* backend.judge(input());
-    expect(result.pass).toBe(true);
-    expect(result.retryCount).toBe(RETRY_ONE);
+    expect(result.pass).toBe(false);
+    expect(result.retryCount).toBe(RETRY_ZERO);
+    expect(result.reason).toContain("ResultError");
+    expect(result.issues[0]?.issue).toContain("spending cap reached");
+  }, 10_000);
+
+  itEffect("aborts and closes the SDK iterator when a judge attempt times out", function* () {
+    setAttemptsToSequence([[HANGING_STEP]]);
+    const backend = new AnthropicJudgeBackend({
+      retrySchedule: [],
+      perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
+    });
+    const startedAt = Date.now();
+    const result = yield* backend.judge(input());
+    expect(result.pass).toBe(false);
+    expect(result.retryCount).toBe(RETRY_ZERO);
+    expect(result.reason).toContain("Timeout");
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(capturedAbortControllers[0]?.signal.aborted).toBe(true);
+    expect(iteratorReturnCount).toBe(1);
   }, 10_000);
 
   itEffect("assembles text from assistant message blocks when no result success message is present", function* () {

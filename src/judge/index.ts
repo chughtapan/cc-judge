@@ -306,6 +306,7 @@ function collectSdkMessages(
   maxTurns: number,
   abortController: AbortController,
   systemPrompt: string,
+  timeoutMs: number,
 ): Effect.Effect<ReadonlyArray<SDKMessage>, JudgeAttemptError, never> {
   return Effect.suspend(() => {
     const q = query({
@@ -320,20 +321,51 @@ function collectSdkMessages(
     });
     const iter = q[Symbol.asyncIterator]();
     const collected: SDKMessage[] = [];
-    const step: Effect.Effect<ReadonlyArray<SDKMessage>, JudgeAttemptError, never> = Effect.tryPromise({
+    const deadline = Date.now() + timeoutMs;
+
+    const nextWithTimeout = Effect.tryPromise({
       try: () => iter.next(),
-      catch: (err) =>
+      catch: (error) =>
         new JudgeAttemptError(
           "SdkFailed",
-          err instanceof Error ? err.message : String(err),
+          error instanceof Error ? error.message : String(error),
         ),
     }).pipe(
-      Effect.flatMap((r) => {
-        if (r.done === true) return Effect.succeed(collected as ReadonlyArray<SDKMessage>);
-        collected.push(r.value);
+      Effect.timeoutFail({
+        duration: Math.max(1, deadline - Date.now()),
+        onTimeout: () => new JudgeAttemptError("Timeout", `per-attempt timeout after ${timeoutMs}ms`),
+      }),
+      Effect.tapError((error) =>
+        error.kind === "Timeout"
+          ? Effect.sync(() => {
+              abortController.abort();
+            }).pipe(
+              Effect.zipRight(
+                Effect.tryPromise({
+                  try: () => iter.return?.() ?? Promise.resolve(undefined),
+                  catch: (returnError) => returnError,
+                }).pipe(
+                  Effect.catchAll((returnError) => {
+                    void returnError;
+                    return Effect.void;
+                  }),
+                ),
+              ),
+            )
+          : Effect.void,
+      ),
+    );
+
+      const step: Effect.Effect<ReadonlyArray<SDKMessage>, JudgeAttemptError, never> = nextWithTimeout.pipe(
+        Effect.flatMap((result) => {
+          if (result.done === true) {
+            return Effect.succeed(collected as ReadonlyArray<SDKMessage>);
+        }
+        collected.push(result.value);
         return step;
       }),
     );
+
     return step;
   });
 }
@@ -447,24 +479,6 @@ function criticalFallback(
   };
 }
 
-function timeoutEff<A>(
-  inner: Effect.Effect<A, JudgeAttemptError, never>,
-  ms: number,
-  abortController: AbortController,
-): Effect.Effect<A, JudgeAttemptError, never> {
-  return Effect.race(
-    inner,
-    sleepEff(ms).pipe(
-      Effect.flatMap(() => {
-        abortController.abort();
-        return Effect.fail<JudgeAttemptError>(
-          new JudgeAttemptError("Timeout", `per-attempt timeout after ${ms}ms`),
-        );
-      }),
-    ),
-  );
-}
-
 function runAttempt(
   input: JudgeInput,
   systemPrompt: string,
@@ -480,7 +494,14 @@ function runAttempt(
     else parentSignal.addEventListener("abort", () => abortController.abort(), { once: true });
   }
   const prompt = renderPrompt(input);
-  const collect = collectSdkMessages(prompt, model, maxTurns, abortController, systemPrompt).pipe(
+  return collectSdkMessages(
+    prompt,
+    model,
+    maxTurns,
+    abortController,
+    systemPrompt,
+    timeoutMs,
+  ).pipe(
     Effect.flatMap((messages) => {
       for (const m of messages) {
         if (m.type === "result" && m.subtype !== "success") {
@@ -496,7 +517,6 @@ function runAttempt(
     }),
     Effect.map((r): JudgeResult => ({ ...r, retryCount: attempt })),
   );
-  return timeoutEff(collect, timeoutMs, abortController);
 }
 
 export class AnthropicJudgeBackend implements JudgeBackend {
@@ -539,6 +559,9 @@ export class AnthropicJudgeBackend implements JudgeBackend {
         );
         if (res._tag === "Right") return res.right;
         lastErr = res.left;
+        if (lastErr.kind === "ResultError") {
+          return criticalFallback(lastErr, attempt);
+        }
         attempt += 1;
       }
       return criticalFallback(lastErr, attempt - 1);

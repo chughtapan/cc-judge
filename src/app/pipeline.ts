@@ -31,6 +31,7 @@ import {
   SubprocessRunner,
   type AgentRunner,
   type AgentHandle,
+  type RunCoordinator,
 } from "../runner/index.js";
 import { makeReportEmitter, type ReportEmitter } from "../emit/report.js";
 import type { ObservabilityEmitter } from "../emit/observability.js";
@@ -41,7 +42,7 @@ import {
   type BundleBuildCause,
   type HarnessExecutionCause,
 } from "../core/errors.js";
-import type { HarnessRunOpts, PlannedRunInput, RunOpts, ScoreOpts } from "./opts.js";
+import type { HarnessRunOpts, PlannedRunInput, RunOpts, ScoreOpts, SharedOpts } from "./opts.js";
 
 const DEFAULT_RUNS_PER_SCENARIO = 1;
 const DEFAULT_CONCURRENCY = 1;
@@ -49,6 +50,43 @@ const DEFAULT_TURN_TIMEOUT_MS = 5 * 60 * 1000;
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function withManagedAbortSignal<A, E>(
+  opts: SharedOpts,
+  run: (abortSignal: AbortSignal | undefined) => Effect.Effect<A, E, never>,
+): Effect.Effect<A, E, never> {
+  if (opts.totalTimeoutMs === undefined) {
+    return run(opts.abortSignal);
+  }
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const controller = new AbortController();
+      const parentSignal = opts.abortSignal;
+      const onParentAbort = () => {
+        controller.abort(parentSignal?.reason);
+      };
+      if (parentSignal !== undefined) {
+        if (parentSignal.aborted) {
+          controller.abort(parentSignal.reason);
+        } else {
+          parentSignal.addEventListener("abort", onParentAbort, { once: true });
+        }
+      }
+      const timer = setTimeout(() => {
+        controller.abort(new Error(`total timeout after ${String(opts.totalTimeoutMs)}ms`));
+      }, opts.totalTimeoutMs);
+      return {
+        signal: controller.signal,
+        cleanup: () => {
+          clearTimeout(timer);
+          parentSignal?.removeEventListener("abort", onParentAbort);
+        },
+      };
+    }),
+    ({ signal }) => run(signal),
+    ({ cleanup }) => Effect.sync(cleanup),
+  );
 }
 
 function summarizeDiff(
@@ -320,67 +358,74 @@ export function runScenarios(
   scenarios: ReadonlyArray<Scenario>,
   opts: RunOpts = {},
 ): Effect.Effect<Report, RunnerResolutionError, never> {
-  return Effect.gen(function* () {
-    const runner = yield* resolveRunner(opts);
-    const judge = opts.judge ?? new AnthropicJudgeBackend();
-    const resultsDir = opts.resultsDir ?? "./eval-results";
-    const emitter = makeReportEmitter({
-      resultsDir,
-      ...(opts.githubComment !== undefined ? { githubComment: opts.githubComment } : {}),
-      ...(opts.githubCommentArtifactUrl !== undefined
-        ? { githubCommentArtifactUrl: opts.githubCommentArtifactUrl }
-        : {}),
-    });
-    const obs = opts.emitters ?? [];
-    const runsPer = opts.runsPerScenario ?? DEFAULT_RUNS_PER_SCENARIO;
-    const modelName = runner.kind === "docker" ? "claude-agent-sdk/docker" : "claude-agent-sdk/subprocess";
-    const judgeModel = judge.name;
+  return withManagedAbortSignal(opts, (abortSignal) =>
+    Effect.gen(function* () {
+      const runner = yield* resolveRunner(opts);
+      const judge = opts.judge ?? new AnthropicJudgeBackend();
+      const resultsDir = opts.resultsDir ?? "./eval-results";
+      const emitter = makeReportEmitter({
+        resultsDir,
+        ...(opts.githubComment !== undefined ? { githubComment: opts.githubComment } : {}),
+        ...(opts.githubCommentArtifactUrl !== undefined
+          ? { githubCommentArtifactUrl: opts.githubCommentArtifactUrl }
+          : {}),
+      });
+      const obs = opts.emitters ?? [];
+      const runsPer = opts.runsPerScenario ?? DEFAULT_RUNS_PER_SCENARIO;
+      const modelName = runner.kind === "docker" ? "claude-agent-sdk/docker" : "claude-agent-sdk/subprocess";
+      const judgeModel = judge.name;
 
-    const filter = opts.scenarioIdFilter;
-    const selected = filter !== undefined && filter.length > 0
-      ? scenarios.filter((s) => filter.includes(s.id))
-      : scenarios;
+      const filter = opts.scenarioIdFilter;
+      const selected = filter !== undefined && filter.length > 0
+        ? scenarios.filter((s) => filter.includes(s.id))
+        : scenarios;
 
-    const jobs: Array<{ readonly scenario: Scenario; readonly runNumber: RunNumberType }> = [];
-    for (const s of selected) {
-      for (let i = 1; i <= runsPer; i += 1) jobs.push({ scenario: s, runNumber: RunNumber(i) });
-    }
+      const jobs: Array<{ readonly scenario: Scenario; readonly runNumber: RunNumberType }> = [];
+      for (const s of selected) {
+        for (let i = 1; i <= runsPer; i += 1) jobs.push({ scenario: s, runNumber: RunNumber(i) });
+      }
 
-    const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
-    const records = yield* Effect.forEach(
-      jobs,
-      (j) =>
-        runOneScenarioOnce(
-          j.scenario,
-          j.runNumber,
-          runner,
-          judge,
-          emitter,
-          obs,
-          modelName,
-          judgeModel,
-          opts.abortSignal,
-        ),
-      { concurrency },
-    );
-    const report = buildReport(records, resultsDir);
-    yield* emitter.emitReport(report);
-    yield* Effect.forEach(obs, (e) => e.onReport({ report }), { discard: true });
-    if (opts.githubComment !== undefined) {
-      yield* emitter.publishGithubComment(report).pipe(
-        Effect.catchAll(() => Effect.void),
+      const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
+      const records = yield* Effect.forEach(
+        jobs,
+        (j) =>
+          runOneScenarioOnce(
+            j.scenario,
+            j.runNumber,
+            runner,
+            judge,
+            emitter,
+            obs,
+            modelName,
+            judgeModel,
+            abortSignal,
+          ),
+        { concurrency },
       );
-    }
-    return report;
-  });
+      const report = buildReport(records, resultsDir);
+      yield* emitter.emitReport(report);
+      yield* Effect.forEach(obs, (e) => e.onReport({ report }), { discard: true });
+      if (opts.githubComment !== undefined) {
+        yield* emitter.publishGithubComment(report).pipe(
+          Effect.catchAll(() => Effect.void),
+        );
+      }
+      return report;
+    }),
+  );
 }
 
 export function runScenario(scenario: Scenario, opts: RunOpts = {}): Effect.Effect<Report, RunnerResolutionError, never> {
   return runScenarios([scenario], opts);
 }
 
-function resolveCoordinator(opts: HarnessRunOpts) {
-  return opts.coordinator ?? new DefaultRunCoordinator(opts.runtime ?? new DockerRuntime());
+function resolveCoordinatorForInput(
+  input: PlannedRunInput,
+  opts: HarnessRunOpts,
+): RunCoordinator {
+  return input.coordinator
+    ?? opts.coordinator
+    ?? new DefaultRunCoordinator(input.runtime ?? opts.runtime ?? new DockerRuntime());
 }
 
 export function runWithHarness(
@@ -395,37 +440,46 @@ export function runPlans(
   inputs: ReadonlyArray<PlannedRunInput>,
   opts: HarnessRunOpts = {},
 ): Effect.Effect<Report, never, never> {
-  return Effect.gen(function* () {
-    const judge = opts.judge ?? new AnthropicJudgeBackend();
-    const resultsDir = opts.resultsDir ?? "./eval-results";
-    const emitter = makeReportEmitter({
-      resultsDir,
-      ...(opts.githubComment !== undefined ? { githubComment: opts.githubComment } : {}),
-      ...(opts.githubCommentArtifactUrl !== undefined
-        ? { githubCommentArtifactUrl: opts.githubCommentArtifactUrl }
-        : {}),
-    });
-    const obs = opts.emitters ?? [];
-    const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
-    const coordinator = resolveCoordinator(opts);
-    const records = yield* Effect.forEach(
-      inputs,
-      (input) => runOnePlannedInput(input, coordinator, judge, emitter, obs, opts.abortSignal),
-      { concurrency },
-    );
-    const report = buildReport(records, resultsDir);
-    yield* emitter.emitReport(report);
-    yield* Effect.forEach(obs, (observer) => observer.onReport({ report }), { discard: true });
-    if (opts.githubComment !== undefined) {
-      yield* emitter.publishGithubComment(report).pipe(Effect.catchAll(() => Effect.void));
-    }
-    return report;
-  });
+  return withManagedAbortSignal(opts, (abortSignal) =>
+    Effect.gen(function* () {
+      const judge = opts.judge ?? new AnthropicJudgeBackend();
+      const resultsDir = opts.resultsDir ?? "./eval-results";
+      const emitter = makeReportEmitter({
+        resultsDir,
+        ...(opts.githubComment !== undefined ? { githubComment: opts.githubComment } : {}),
+        ...(opts.githubCommentArtifactUrl !== undefined
+          ? { githubCommentArtifactUrl: opts.githubCommentArtifactUrl }
+          : {}),
+      });
+      const obs = opts.emitters ?? [];
+      const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
+      const records = yield* Effect.forEach(
+        inputs,
+        (input) =>
+          runOnePlannedInput(
+            input,
+            resolveCoordinatorForInput(input, opts),
+            judge,
+            emitter,
+            obs,
+            abortSignal,
+          ),
+        { concurrency },
+      );
+      const report = buildReport(records, resultsDir);
+      yield* emitter.emitReport(report);
+      yield* Effect.forEach(obs, (observer) => observer.onReport({ report }), { discard: true });
+      if (opts.githubComment !== undefined) {
+        yield* emitter.publishGithubComment(report).pipe(Effect.catchAll(() => Effect.void));
+      }
+      return report;
+    }),
+  );
 }
 
 function runOnePlannedInput(
   input: PlannedRunInput,
-  coordinator: ReturnType<typeof resolveCoordinator>,
+  coordinator: RunCoordinator,
   judge: JudgeBackend,
   emitter: ReportEmitter,
   obs: ReadonlyArray<ObservabilityEmitter>,
@@ -458,63 +512,67 @@ export function scoreBundles(
   bundles: ReadonlyArray<JudgmentBundle>,
   opts: ScoreOpts = {},
 ): Effect.Effect<Report, never, never> {
-  return Effect.gen(function* () {
-    const judge = opts.judge ?? new AnthropicJudgeBackend();
-    const resultsDir = opts.resultsDir ?? "./eval-results";
-    const emitter = makeReportEmitter({
-      resultsDir,
-      ...(opts.githubComment !== undefined ? { githubComment: opts.githubComment } : {}),
-      ...(opts.githubCommentArtifactUrl !== undefined
-        ? { githubCommentArtifactUrl: opts.githubCommentArtifactUrl }
-        : {}),
-    });
-    const obs = opts.emitters ?? [];
-    const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
-    const records = yield* Effect.forEach(
-      bundles,
-      (bundle) => scoreOneBundle(bundle, judge, emitter, obs, opts.abortSignal),
-      { concurrency },
-    );
-    const report = buildReport(records, resultsDir);
-    yield* emitter.emitReport(report);
-    yield* Effect.forEach(obs, (observer) => observer.onReport({ report }), { discard: true });
-    if (opts.githubComment !== undefined) {
-      yield* emitter.publishGithubComment(report).pipe(Effect.catchAll(() => Effect.void));
-    }
-    return report;
-  });
+  return withManagedAbortSignal(opts, (abortSignal) =>
+    Effect.gen(function* () {
+      const judge = opts.judge ?? new AnthropicJudgeBackend();
+      const resultsDir = opts.resultsDir ?? "./eval-results";
+      const emitter = makeReportEmitter({
+        resultsDir,
+        ...(opts.githubComment !== undefined ? { githubComment: opts.githubComment } : {}),
+        ...(opts.githubCommentArtifactUrl !== undefined
+          ? { githubCommentArtifactUrl: opts.githubCommentArtifactUrl }
+          : {}),
+      });
+      const obs = opts.emitters ?? [];
+      const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
+      const records = yield* Effect.forEach(
+        bundles,
+        (bundle) => scoreOneBundle(bundle, judge, emitter, obs, abortSignal),
+        { concurrency },
+      );
+      const report = buildReport(records, resultsDir);
+      yield* emitter.emitReport(report);
+      yield* Effect.forEach(obs, (observer) => observer.onReport({ report }), { discard: true });
+      if (opts.githubComment !== undefined) {
+        yield* emitter.publishGithubComment(report).pipe(Effect.catchAll(() => Effect.void));
+      }
+      return report;
+    }),
+  );
 }
 
 export function scoreTraces(
   traces: ReadonlyArray<Trace>,
   opts: ScoreOpts = {},
 ): Effect.Effect<Report, never, never> {
-  return Effect.gen(function* () {
-    const judge = opts.judge ?? new AnthropicJudgeBackend();
-    const resultsDir = opts.resultsDir ?? "./eval-results";
-    const emitter = makeReportEmitter({
-      resultsDir,
-      ...(opts.githubComment !== undefined ? { githubComment: opts.githubComment } : {}),
-      ...(opts.githubCommentArtifactUrl !== undefined
-        ? { githubCommentArtifactUrl: opts.githubCommentArtifactUrl }
-        : {}),
-    });
-    const obs = opts.emitters ?? [];
-    const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
+  return withManagedAbortSignal(opts, (abortSignal) =>
+    Effect.gen(function* () {
+      const judge = opts.judge ?? new AnthropicJudgeBackend();
+      const resultsDir = opts.resultsDir ?? "./eval-results";
+      const emitter = makeReportEmitter({
+        resultsDir,
+        ...(opts.githubComment !== undefined ? { githubComment: opts.githubComment } : {}),
+        ...(opts.githubCommentArtifactUrl !== undefined
+          ? { githubCommentArtifactUrl: opts.githubCommentArtifactUrl }
+          : {}),
+      });
+      const obs = opts.emitters ?? [];
+      const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
 
-    const records = yield* Effect.forEach(
-      traces,
-      (trace) => scoreOneTrace(trace, judge, emitter, obs, opts.abortSignal),
-      { concurrency },
-    );
-    const report = buildReport(records, resultsDir);
-    yield* emitter.emitReport(report);
-    yield* Effect.forEach(obs, (observer) => observer.onReport({ report }), { discard: true });
-    if (opts.githubComment !== undefined) {
-      yield* emitter.publishGithubComment(report).pipe(Effect.catchAll(() => Effect.void));
-    }
-    return report;
-  });
+      const records = yield* Effect.forEach(
+        traces,
+        (trace) => scoreOneTrace(trace, judge, emitter, obs, abortSignal),
+        { concurrency },
+      );
+      const report = buildReport(records, resultsDir);
+      yield* emitter.emitReport(report);
+      yield* Effect.forEach(obs, (observer) => observer.onReport({ report }), { discard: true });
+      if (opts.githubComment !== undefined) {
+        yield* emitter.publishGithubComment(report).pipe(Effect.catchAll(() => Effect.void));
+      }
+      return report;
+    }),
+  );
 }
 
 function traceToScenario(trace: Trace): Scenario {
@@ -681,6 +739,15 @@ function coordinationFailureOutcomes(
         endedAt,
         reason: abortSignal?.aborted === true ? cancelledReason : renderBundleBuildFailureCause(cause.detail),
       }));
+    default:
+      return plan.agents.map((agent) => ({
+        agentId: agent.id,
+        status: abortSignal?.aborted === true ? "cancelled" as const : "runtime_error" as const,
+        endedAt,
+        reason: abortSignal?.aborted === true
+          ? cancelledReason
+          : renderUnknownCoordinationFailure(cause),
+      }));
   }
 }
 
@@ -698,6 +765,15 @@ function deterministicFailureJudge(
     overallSeverity: "critical",
     retryCount: 0,
   };
+}
+
+function renderUnknownCoordinationFailure(
+  cause: RunCoordinationError["cause"],
+): string {
+  const detail = JSON.stringify(cause);
+  return detail === undefined
+    ? "unexpected coordination failure"
+    : `unexpected coordination failure: ${detail}`;
 }
 
 function renderAgentStartCause(cause: AgentStartErrorCause): string {

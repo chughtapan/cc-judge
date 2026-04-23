@@ -3,20 +3,23 @@ import { Effect } from "effect";
 import { mkdtempSync } from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { runScenarios, runScenario, scoreTraces } from "../src/app/pipeline.js";
+import { runPlans, runScenarios, runScenario, scoreTraces } from "../src/app/pipeline.js";
 import * as reportModule from "../src/emit/report.js";
 import {
+  AgentId,
   ScenarioId,
+  ProjectId,
   TraceId,
   ISSUE_SEVERITY,
   RUN_SOURCE,
 } from "../src/core/types.js";
 import type { Scenario, Trace, JudgeResult } from "../src/core/schema.js";
 import type { JudgeBackend } from "../src/judge/index.js";
-import type { AgentRunner, AgentHandle } from "../src/runner/index.js";
+import type { AgentRunner, AgentHandle, ExecutionHarness, RunCoordinator } from "../src/runner/index.js";
 import type {
   AgentStartError,
   AgentRunTimeoutError,
+  RunCoordinationError,
   RunnerResolutionError,
 } from "../src/core/errors.js";
 import { itEffect, EITHER_LEFT, EITHER_RIGHT } from "./support/effect.js";
@@ -144,6 +147,64 @@ describe("runScenarios", () => {
     });
     expect(report.summary.failed).toBe(EXPECTED_FAILED_ONE);
     expect(report.runs[0]?.overallSeverity).toBe(ISSUE_SEVERITY.Significant);
+  });
+});
+
+describe("runPlans", () => {
+  itEffect("folds unexpected coordination failures into a failed run record", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    const plan = {
+      project: ProjectId("cc-judge"),
+      scenarioId: ScenarioId("unexpected-coordination"),
+      name: "unexpected coordination",
+      description: "coordinator returns an unknown failure shape",
+      requirements: {
+        expectedBehavior: "report a failed run instead of crashing",
+        validationChecks: ["report contains a deterministic coordination failure"],
+      },
+      agents: [
+        {
+          id: AgentId("agent-1"),
+          name: "Agent 1",
+          artifact: {
+            _tag: "DockerImageArtifact" as const,
+            image: "repo/agent:latest",
+          },
+          promptInputs: {},
+        },
+      ],
+    };
+    const harness: ExecutionHarness = {
+      name: "test-harness",
+      run() {
+        return Effect.fail({
+          _tag: "ExecutionFailed" as const,
+          message: "unused in this test",
+        });
+      },
+    };
+    const coordinator: RunCoordinator = {
+      execute() {
+        return Effect.fail({
+          _tag: "RunCoordinationError",
+          cause: {
+            _tag: "UnexpectedFailure",
+            detail: {
+              message: "boom",
+            },
+          },
+        } as unknown as RunCoordinationError);
+      },
+    };
+
+    const report = yield* runPlans([{ plan, harness, coordinator }], {
+      judge: stubJudge,
+      resultsDir: dir,
+    });
+
+    expect(report.summary.failed).toBe(1);
+    expect(report.runs[0]?.pass).toBe(false);
+    expect(report.runs[0]?.reason).toContain("unexpected coordination failure");
   });
 });
 
@@ -2333,6 +2394,59 @@ describe("ConditionalExpression: abortSignal spread in scoreOneTrace", () => {
     });
     expect(capturedSignal).toBeUndefined();
   });
+
+  itEffect("totalTimeoutMs derives an abort signal that cancels a hanging trace judge", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-pipe-"));
+    let capturedSignal: AbortSignal | undefined;
+    const timeoutJudge: JudgeBackend = {
+      name: "signal-st-timeout",
+      judge(opts) {
+        capturedSignal = opts.abortSignal;
+        return Effect.async((resume) => {
+          const signal = opts.abortSignal;
+          const onAbort = () => {
+            resume(Effect.succeed({
+              pass: false,
+              reason: "aborted by total timeout",
+              issues: [{ issue: "timeout", severity: "critical" }],
+              overallSeverity: "critical",
+              retryCount: 0,
+            }));
+          };
+          if (signal === undefined) {
+            onAbort();
+            return Effect.void;
+          }
+          if (signal.aborted) {
+            onAbort();
+            return Effect.void;
+          }
+          signal.addEventListener("abort", onAbort, { once: true });
+          return Effect.sync(() => {
+            signal.removeEventListener("abort", onAbort);
+          });
+        });
+      },
+    };
+    const trace: Trace = {
+      traceId: TraceId("signal-st-timeout"),
+      name: "sst-timeout",
+      turns: [],
+      expectedBehavior: "e",
+      validationChecks: ["c"],
+    };
+
+    const report = yield* scoreTraces([trace], {
+      judge: timeoutJudge,
+      resultsDir: dir,
+      totalTimeoutMs: 10,
+    });
+
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(report.summary.failed).toBe(1);
+    expect(report.runs[0]?.reason).toContain("aborted by total timeout");
+  }, 10_000);
 });
 
 // ── BlockStatement: publishGithubComment block body (L287, L325) ───────────

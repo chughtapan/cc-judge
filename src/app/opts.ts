@@ -39,4 +39,6 @@ export interface HarnessRunOpts extends SharedOpts {
 export interface PlannedRunInput {
   readonly plan: RunPlan;
   readonly harness: ExecutionHarness;
+  readonly runtime?: AgentRuntime;
+  readonly coordinator?: RunCoordinator;
 }

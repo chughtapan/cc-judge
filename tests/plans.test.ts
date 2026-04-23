@@ -1,4 +1,4 @@
-import { describe, expect, afterEach, vi } from "vitest";
+import { afterEach, describe, expect, vi } from "vitest";
 import { Effect } from "effect";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
@@ -9,11 +9,10 @@ import {
   PlanFilePath,
   compilePlannedHarnessDocuments,
   decodePlannedHarnessDocument,
-  decodePromptWorkspacePlanSpec,
   loadPlannedHarnessPath,
   runPlannedHarnessPath,
 } from "../src/plans/index.js";
-import { itEffect, EITHER_LEFT, EITHER_RIGHT } from "./support/effect.js";
+import { itEffect, EITHER_LEFT } from "./support/effect.js";
 
 let capturedPlannedInputs: ReadonlyArray<unknown> | null = null;
 let capturedHarnessRunOpts: Record<string, unknown> | null = null;
@@ -42,43 +41,67 @@ vi.mock("../src/app/pipeline.js", () => ({
 const EXIT_SUCCESS = 0;
 const EXIT_FATAL = 2;
 
-function planYaml(overrides: {
+function writeHarnessModule(dir: string): string {
+  const modulePath = path.join(dir, "fixture-harness.mjs");
+  writeFileSync(
+    modulePath,
+    [
+      "import { Effect } from 'effect';",
+      "",
+      "const fixtureHarness = {",
+      "  load(args) {",
+      "    return Effect.succeed({",
+      "      plan: {",
+      "        project: args.plan.project,",
+      "        scenarioId: args.plan.scenarioId,",
+      "        name: args.plan.name,",
+      "        description: args.plan.description,",
+      "        requirements: args.plan.requirements,",
+      "        ...(args.plan.metadata !== undefined ? { metadata: args.plan.metadata } : {}),",
+      "        agents: [",
+      "          {",
+      "            id: 'alpha',",
+      "            name: 'Alpha',",
+      "            artifact: { _tag: 'DockerImageArtifact', image: 'repo/alpha:latest' },",
+      "            promptInputs: { payload: args.payload },",
+      "          },",
+      "        ],",
+      "      },",
+      "      harness: {",
+      "        name: 'fixture-harness',",
+      "        run: () => Effect.void,",
+      "      },",
+      "    });",
+      "  },",
+      "};",
+      "",
+      "export default fixtureHarness;",
+      "export { fixtureHarness };",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return modulePath;
+}
+
+function planYaml(harnessModulePath: string, overrides: {
   readonly scenarioId?: string;
-  readonly harnessKind?: string;
+  readonly exportName?: string;
 } = {}): string {
   return YAML.stringify({
-    plan: {
-      project: "cc-judge",
-      scenarioId: overrides.scenarioId ?? "planned-harness-smoke",
-      name: "planned-harness-smoke",
-      description: "exercise planned harness ingress",
-      agents: [
-        {
-          id: "alpha",
-          name: "Alpha",
-          artifact: {
-            _tag: "DockerImageArtifact",
-            image: "repo/alpha:latest",
-          },
-          promptInputs: {},
-        },
-      ],
-      requirements: {
-        expectedBehavior: "complete one prompt",
-        validationChecks: ["summary should be emitted"],
-      },
+    project: "cc-judge",
+    scenarioId: overrides.scenarioId ?? "planned-harness-smoke",
+    name: "planned-harness-smoke",
+    description: "exercise planned harness ingress",
+    requirements: {
+      expectedBehavior: "complete one prompt",
+      validationChecks: ["summary should be emitted"],
     },
     harness: {
-      kind: overrides.harnessKind ?? "prompt-workspace",
-      config: {
+      module: harnessModulePath,
+      ...(overrides.exportName !== undefined ? { export: overrides.exportName } : {}),
+      payload: {
         prompts: ["Fix the failing test"],
-        workspace: [
-          {
-            path: "README.md",
-            content: "hello",
-          },
-        ],
-        turnTimeoutMs: 1_000,
       },
     },
   });
@@ -90,6 +113,21 @@ function writePlanFile(dir: string, name: string, yaml: string): string {
   return filePath;
 }
 
+function installStderrCapture(): { readonly chunks: string[]; readonly restore: () => void } {
+  const chunks: string[] = [];
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+    return originalWrite(chunk as never, ...(rest as []));
+  }) as typeof process.stderr.write;
+  return {
+    chunks,
+    restore: () => {
+      process.stderr.write = originalWrite;
+    },
+  };
+}
+
 afterEach(() => {
   capturedPlannedInputs = null;
   capturedHarnessRunOpts = null;
@@ -98,23 +136,22 @@ afterEach(() => {
 describe("planned harness schema", () => {
   itEffect("decodes one planned-harness document from YAML", function* () {
     const decoded = yield* decodePlannedHarnessDocument(
-      YAML.parse(planYaml()),
+      YAML.parse(
+        planYaml("./fixture-harness.mjs"),
+      ),
       PlanFilePath("mem://planned-harness.yaml"),
     );
 
-    expect(decoded.plan.project).toBe("cc-judge");
-    expect(decoded.plan.scenarioId).toBe("planned-harness-smoke");
-    expect(decoded.plan.agents[0].id).toBe("alpha");
-    expect(decoded.harness.kind).toBe("prompt-workspace");
-    expect(decoded.harness.config.prompts).toEqual(["Fix the failing test"]);
-    expect(decoded.harness.config.workspace?.[0]?.path).toBe("README.md");
-    expect(decoded.harness.config.turnTimeoutMs).toBe(1_000);
+    expect(decoded.project).toBe("cc-judge");
+    expect(decoded.scenarioId).toBe("planned-harness-smoke");
+    expect(decoded.harness.module).toBe("./fixture-harness.mjs");
+    expect(decoded.harness.export).toBeUndefined();
   });
 
   itEffect("rejects non-document roots with TopLevelNotDocument", function* () {
     const result = yield* Effect.either(
       decodePlannedHarnessDocument(
-        [YAML.parse(planYaml())],
+        [YAML.parse(planYaml("./fixture-harness.mjs"))],
         PlanFilePath("mem://array-root.yaml"),
       ),
     );
@@ -123,26 +160,6 @@ describe("planned harness schema", () => {
     if (result._tag === EITHER_LEFT) {
       expect(result.left.cause._tag).toBe("TopLevelNotDocument");
       expect(result.left.cause.path).toBe("mem://array-root.yaml");
-    }
-  });
-
-  itEffect("rejects unsupported harness kinds before schema decode", function* () {
-    const result = yield* Effect.either(
-      decodePromptWorkspacePlanSpec(
-        {
-          kind: "arena-game",
-          config: {
-            prompts: ["ignored"],
-          },
-        },
-        PlanFilePath("mem://unsupported.yaml"),
-      ),
-    );
-
-    expect(result._tag).toBe(EITHER_LEFT);
-    if (result._tag === EITHER_LEFT) {
-      expect(result.left.cause._tag).toBe("UnsupportedHarnessKind");
-      expect(result.left.cause.kind).toBe("arena-game");
     }
   });
 });
@@ -172,8 +189,9 @@ describe("planned harness loader", () => {
 
   itEffect("rejects duplicate scenario ids across matched files", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-dup-"));
-    writePlanFile(dir, "a.yaml", planYaml({ scenarioId: "duplicate-scenario" }));
-    writePlanFile(dir, "b.yaml", planYaml({ scenarioId: "duplicate-scenario" }));
+    const harnessModulePath = writeHarnessModule(dir);
+    writePlanFile(dir, "a.yaml", planYaml(harnessModulePath, { scenarioId: "duplicate-scenario" }));
+    writePlanFile(dir, "b.yaml", planYaml(harnessModulePath, { scenarioId: "duplicate-scenario" }));
 
     const result = yield* Effect.either(loadPlannedHarnessPath(path.join(dir, "*.yaml")));
 
@@ -189,26 +207,26 @@ describe("planned harness loader", () => {
 
 describe("planned harness compiler + cli ingress", () => {
   itEffect("compiles loaded documents into planned run inputs", function* () {
-    const document = yield* decodePlannedHarnessDocument(
-      YAML.parse(planYaml()),
-      PlanFilePath("mem://compiled.yaml"),
-    );
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-compile-"));
+    const harnessModulePath = writeHarnessModule(dir);
+    const sourcePath = writePlanFile(dir, "compiled.yaml", planYaml(harnessModulePath));
+    const documents = yield* loadPlannedHarnessPath(sourcePath);
+    const compiled = yield* compilePlannedHarnessDocuments(documents);
 
-    const compiled = yield* compilePlannedHarnessDocuments([
-      {
-        sourcePath: PlanFilePath("mem://compiled.yaml"),
-        document,
-      },
-    ]);
-
-    expect(compiled[0]?.sourcePath).toBe("mem://compiled.yaml");
+    expect(compiled[0]?.sourcePath).toBe(sourcePath);
     expect(compiled[0]?.input.plan.scenarioId).toBe("planned-harness-smoke");
-    expect(compiled[0]?.input.harness.name).toBe("prompt-workspace");
+    expect(compiled[0]?.input.harness.name).toBe("fixture-harness");
+    expect(compiled[0]?.input.plan.agents[0]?.promptInputs).toMatchObject({
+      payload: {
+        prompts: ["Fix the failing test"],
+      },
+    });
   });
 
   itEffect("runs a planned-harness path through the existing runPlans pipeline", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-run-"));
-    const planPath = writePlanFile(dir, "single.yaml", planYaml());
+    const harnessModulePath = writeHarnessModule(dir);
+    const planPath = writePlanFile(dir, "single.yaml", planYaml(harnessModulePath));
     const resultsDir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-out-"));
 
     const report = yield* runPlannedHarnessPath(planPath, { resultsDir });
@@ -220,17 +238,32 @@ describe("planned harness compiler + cli ingress", () => {
       readonly harness: { readonly name: string };
     };
     expect(input.plan.scenarioId).toBe("planned-harness-smoke");
-    expect(input.harness.name).toBe("prompt-workspace");
+    expect(input.harness.name).toBe("fixture-harness");
     expect(capturedHarnessRunOpts?.["resultsDir"]).toBe(resultsDir);
   });
 
-  itEffect("dispatches `run-plans` through the CLI with runtime options", function* () {
+  itEffect("forwards totalTimeoutMs into the planned-harness run pipeline", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-timeout-"));
+    const harnessModulePath = writeHarnessModule(dir);
+    const planPath = writePlanFile(dir, "timeout.yaml", planYaml(harnessModulePath));
+    const resultsDir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-timeout-out-"));
+
+    yield* runPlannedHarnessPath(planPath, {
+      resultsDir,
+      totalTimeoutMs: 12_345,
+    });
+
+    expect(capturedHarnessRunOpts?.["totalTimeoutMs"]).toBe(12_345);
+  });
+
+  itEffect("dispatches `run` through the CLI with explicit harness YAML", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-cli-"));
-    const planPath = writePlanFile(dir, "cli.yaml", planYaml());
+    const harnessModulePath = writeHarnessModule(dir);
+    const planPath = writePlanFile(dir, "cli.yaml", planYaml(harnessModulePath));
     const resultsDir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-cli-out-"));
 
     const code = yield* main([
-      "run-plans",
+      "run",
       planPath,
       "--runtime",
       "subprocess",
@@ -247,14 +280,53 @@ describe("planned harness compiler + cli ingress", () => {
     expect(capturedPlannedInputs).toHaveLength(1);
   });
 
-  itEffect("returns exit 2 when `run-plans` receives a missing file", function* () {
-    const code = yield* main([
-      "run-plans",
-      path.join(os.tmpdir(), `cc-judge-cli-missing-plan-${Date.now()}.yaml`),
-      "--log-level",
-      "error",
-    ]);
+  itEffect("returns exit 2 when `run` receives mixed legacy and harness YAML", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-mixed-"));
+    const harnessModulePath = writeHarnessModule(dir);
+    writePlanFile(dir, "harness.yaml", planYaml(harnessModulePath));
+    writePlanFile(
+      dir,
+      "legacy.yaml",
+      YAML.stringify({
+        id: "legacy",
+        name: "legacy",
+        description: "legacy",
+        setupPrompt: "hello",
+        expectedBehavior: "world",
+        validationChecks: ["one"],
+      }),
+    );
+
+    const code = yield* main(["run", path.join(dir, "*.yaml"), "--log-level", "error"]);
 
     expect(code).toBe(EXIT_FATAL);
+  });
+
+  itEffect("returns exit 2 when harness export is missing", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-missing-export-"));
+    const harnessModulePath = writeHarnessModule(dir);
+    const planPath = writePlanFile(
+      dir,
+      "missing-export.yaml",
+      planYaml(harnessModulePath, { exportName: "missingHarness" }),
+    );
+
+    const code = yield* main(["run", planPath, "--log-level", "error"]);
+
+    expect(code).toBe(EXIT_FATAL);
+  });
+
+  itEffect("returns exit 2 with a parse error instead of falling back to legacy scenario loading", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-invalid-"));
+    const badPath = writePlanFile(dir, "broken.yaml", "harness:\n  module: [\n");
+    const { chunks, restore } = installStderrCapture();
+
+    const code = yield* Effect.ensuring(
+      main(["run", badPath, "--runtime", "subprocess", "--log-level", "error"]),
+      Effect.sync(restore),
+    );
+
+    expect(code).toBe(EXIT_FATAL);
+    expect(chunks.join("")).toContain("run input parse failed");
   });
 });
