@@ -30,7 +30,7 @@ const BRAINTRUST_PROJECT = "test-project";
 
 function makeRecord(id: string, pass: boolean, inputTokens: number, outputTokens: number): RunRecord {
   return {
-    source: RUN_SOURCE.Trace,
+    source: RUN_SOURCE.Bundle,
     scenarioId: ScenarioId(id),
     runNumber: RunNumber(1),
     modelName: "test-model",

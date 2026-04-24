@@ -1,11 +1,9 @@
-// Options surfaces for the two SDK entrypoints.
-// Shared fields live in a common base; run/score specialize.
+// Options surfaces for the supported harness and bundle-scoring entrypoints.
 
 import type { JudgeBackend } from "../judge/index.js";
 import type { ObservabilityEmitter } from "../emit/observability.js";
 import type { AgentRuntime, ExecutionHarness, RunCoordinator } from "../runner/index.js";
 import type { LogLevel, RunPlan } from "../core/types.js";
-import type { TraceFormat } from "../emit/trace-adapter.js";
 
 export interface SharedOpts {
   readonly judge?: JudgeBackend;
@@ -19,9 +17,7 @@ export interface SharedOpts {
   readonly abortSignal?: AbortSignal;
 }
 
-export interface ScoreOpts extends SharedOpts {
-  readonly traceFormat?: TraceFormat;
-}
+export interface ScoreOpts extends SharedOpts {}
 
 export interface HarnessRunOpts extends SharedOpts {
   readonly runtime?: AgentRuntime;

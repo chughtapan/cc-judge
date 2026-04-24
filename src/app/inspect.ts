@@ -31,6 +31,8 @@ export type InspectErrorCause =
   | { readonly _tag: "RunNotFound"; readonly runId: string }
   | { readonly _tag: "DuplicateSeq"; readonly seq: number; readonly runId: string };
 
+export const InspectErrorCause = Data.taggedEnum<InspectErrorCause>();
+
 export class InspectError extends Data.TaggedError("InspectError")<{
   readonly cause: InspectErrorCause;
 }> {}
@@ -249,7 +251,7 @@ export function inspectRun(
     const resolved = resolveWalFile(runId, walPaths);
 
     if (resolved === null) {
-      return Effect.fail(new InspectError({ cause: { _tag: "RunNotFound", runId } }));
+      return Effect.fail(new InspectError({ cause: InspectErrorCause.RunNotFound({ runId }) }));
     }
 
     const { file, source } = resolved;
@@ -260,7 +262,7 @@ export function inspectRun(
     const firstDup = duplicates[0];
     if (firstDup !== undefined) {
       return Effect.fail(
-        new InspectError({ cause: { _tag: "DuplicateSeq", seq: firstDup, runId } }),
+        new InspectError({ cause: InspectErrorCause.DuplicateSeq({ seq: firstDup, runId }) }),
       );
     }
 

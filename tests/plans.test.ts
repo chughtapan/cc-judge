@@ -21,11 +21,6 @@ let capturedPlannedInputs: ReadonlyArray<unknown> | null = null;
 let capturedHarnessRunOpts: Record<string, unknown> | null = null;
 
 vi.mock("../src/app/pipeline.js", () => ({
-  scoreTraces: vi.fn(() =>
-    Effect.succeed({
-      runs: [],
-      summary: { total: 0, passed: 0, failed: 0, avgLatencyMs: 0 },
-    })),
   runPlans: vi.fn((inputs: ReadonlyArray<unknown>, opts: Record<string, unknown>) => {
     capturedPlannedInputs = inputs;
     capturedHarnessRunOpts = opts;
@@ -114,14 +109,15 @@ function writePlanFile(dir: string, name: string, yaml: string): string {
 function installStderrCapture(): { readonly chunks: string[]; readonly restore: () => void } {
   const chunks: string[] = [];
   const originalWrite = process.stderr.write.bind(process.stderr);
-  process.stderr.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+  const spy = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
     chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
     return originalWrite(chunk as never, ...(rest as []));
   }) as typeof process.stderr.write;
+  Object.defineProperty(process.stderr, "write", { configurable: true, value: spy });
   return {
     chunks,
     restore: () => {
-      process.stderr.write = originalWrite;
+      Object.defineProperty(process.stderr, "write", { configurable: true, value: originalWrite });
     },
   };
 }

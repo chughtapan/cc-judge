@@ -4,7 +4,7 @@
 
 import { Effect } from "effect";
 import { randomUUID } from "node:crypto";
-import type { Report, RunRecord, Trace, JudgeResult } from "../core/schema.js";
+import type { Report, RunRecord, JudgeResult } from "../core/schema.js";
 import type {
   JudgmentBundle,
   RunPlan,
@@ -12,16 +12,12 @@ import type {
   Turn,
   WorkspaceDiff,
   IssueSeverity,
-  ScenarioId as ScenarioIdType,
-  RunNumber as RunNumberType,
-  TraceId as TraceIdType,
 } from "../core/types.js";
 import {
   RUN_SOURCE,
   RunId,
   RunNumber,
   agentRefFromDeclaration,
-  scenarioIdFromTraceId,
 } from "../core/types.js";
 import { AnthropicJudgeBackend, judgeBundle, type JudgeBackend } from "../judge/index.js";
 import {
@@ -117,47 +113,6 @@ function sumTurns(turns: ReadonlyArray<Turn>): {
     cacheWriteTokens += t.cacheWriteTokens;
   }
   return { toolCallCount, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
-}
-
-function buildRecord(params: {
-  readonly source: "trace";
-  readonly scenarioId: ScenarioIdType;
-  readonly runNumber: RunNumberType;
-  readonly modelName: string;
-  readonly judgeModel: string;
-  readonly startedAt: string;
-  readonly latencyMs: number;
-  readonly judge: JudgeResult;
-  readonly turns: ReadonlyArray<Turn>;
-  readonly workspaceDiff?: WorkspaceDiff;
-  readonly transcriptPath: string;
-  readonly traceId?: TraceIdType;
-}): RunRecord {
-  const agg = sumTurns(params.turns);
-  const summary = summarizeDiff(params.workspaceDiff);
-  const base: RunRecord = {
-    source: params.source,
-    scenarioId: params.scenarioId,
-    runNumber: params.runNumber,
-    modelName: params.modelName,
-    judgeModel: params.judgeModel,
-    startedAt: params.startedAt,
-    latencyMs: params.latencyMs,
-    pass: params.judge.pass,
-    reason: params.judge.reason,
-    issues: params.judge.issues,
-    overallSeverity: params.judge.overallSeverity as IssueSeverity | null,
-    judgeConfidence: params.judge.judgeConfidence ?? null,
-    retryCount: params.judge.retryCount,
-    toolCallCount: agg.toolCallCount,
-    inputTokens: agg.inputTokens,
-    outputTokens: agg.outputTokens,
-    cacheReadTokens: agg.cacheReadTokens,
-    cacheWriteTokens: agg.cacheWriteTokens,
-    transcriptPath: params.transcriptPath,
-    workspaceDiffSummary: summary,
-  };
-  return params.traceId !== undefined ? { ...base, traceId: params.traceId } : base;
 }
 
 function sumAgentTurns(turns: ReadonlyArray<AgentTurn> | undefined): {
@@ -309,19 +264,34 @@ function runOnePlannedInput(
     const startedAt = nowIso();
     const startMs = Date.now();
     const executionOpts = abortSignal !== undefined ? { abortSignal } : {};
-    const execution = yield* Effect.either(coordinator.execute(input.plan, input.harness, executionOpts));
-    const latencyMs = Date.now() - startMs;
-    const record = execution._tag === "Right"
-      ? buildBundleRecord({
-          bundle: execution.right,
-          judge: yield* judgeBundle(judge, execution.right, abortSignal),
-          judgeModel: judge.name,
-          startedAt,
-          latencyMs,
-        })
-      : buildBundleRecord(
-          coordinationFailureRecordInput(input.plan, execution.left, startedAt, latencyMs, abortSignal),
-        );
+    const record = yield* coordinator.execute(input.plan, input.harness, executionOpts).pipe(
+      Effect.matchEffect({
+        onFailure: (error) =>
+          Effect.succeed(
+            buildBundleRecord(
+              coordinationFailureRecordInput(
+                input.plan,
+                error,
+                startedAt,
+                Date.now() - startMs,
+                abortSignal,
+              ),
+            ),
+          ),
+        onSuccess: (bundle) =>
+          judgeBundle(judge, bundle, abortSignal).pipe(
+            Effect.map((judgment) =>
+              buildBundleRecord({
+                bundle,
+                judge: judgment,
+                judgeModel: judge.name,
+                startedAt,
+                latencyMs: Date.now() - startMs,
+              }),
+            ),
+          ),
+      }),
+    );
     yield* emitter.emitRun(record);
     yield* Effect.forEach(obs, (observer) => observer.onRun({ record }), { discard: true });
     return record;
@@ -359,103 +329,6 @@ export function scoreBundles(
       return report;
     }),
   );
-}
-
-export function scoreTraces(
-  traces: ReadonlyArray<Trace>,
-  opts: ScoreOpts = {},
-): Effect.Effect<Report, never, never> {
-  return withManagedAbortSignal(opts, (abortSignal) =>
-    Effect.gen(function* () {
-      const judge = opts.judge ?? new AnthropicJudgeBackend();
-      const resultsDir = opts.resultsDir ?? "./eval-results";
-      const emitter = makeReportEmitter({
-        resultsDir,
-        ...(opts.githubComment !== undefined ? { githubComment: opts.githubComment } : {}),
-        ...(opts.githubCommentArtifactUrl !== undefined
-          ? { githubCommentArtifactUrl: opts.githubCommentArtifactUrl }
-          : {}),
-      });
-      const obs = opts.emitters ?? [];
-      const concurrency = Math.max(1, opts.concurrency ?? DEFAULT_CONCURRENCY);
-
-      const records = yield* Effect.forEach(
-        traces,
-        (trace) => scoreOneTrace(trace, judge, emitter, obs, abortSignal),
-        { concurrency },
-      );
-      const report = buildReport(records, resultsDir);
-      yield* emitter.emitReport(report);
-      yield* Effect.forEach(obs, (observer) => observer.onReport({ report }), { discard: true });
-      if (opts.githubComment !== undefined) {
-        yield* emitter.publishGithubComment(report).pipe(Effect.catchAll(() => Effect.void));
-      }
-      return report;
-    }),
-  );
-}
-
-function traceToJudgeTarget(trace: Trace): {
-  readonly scenarioId: ScenarioIdType;
-  readonly name: string;
-  readonly description: string;
-  readonly requirements: {
-    readonly expectedBehavior: string;
-    readonly validationChecks: ReadonlyArray<string>;
-    readonly judgeRubric?: string;
-  };
-} {
-  return {
-    scenarioId: trace.scenarioId ?? scenarioIdFromTraceId(trace.traceId),
-    name: trace.name,
-    description: "",
-    requirements: {
-      expectedBehavior: trace.expectedBehavior,
-      validationChecks: trace.validationChecks,
-      ...(trace.judgeRubric !== undefined ? { judgeRubric: trace.judgeRubric } : {}),
-    },
-  };
-}
-
-function scoreOneTrace(
-  trace: Trace,
-  judge: JudgeBackend,
-  emitter: ReportEmitter,
-  obs: ReadonlyArray<ObservabilityEmitter>,
-  abortSignal: AbortSignal | undefined,
-): Effect.Effect<RunRecord, never, never> {
-  return Effect.gen(function* () {
-    const startedAt = nowIso();
-    const startMs = Date.now();
-    const target = traceToJudgeTarget(trace);
-    const judgeResult = yield* judge.judge({
-      target,
-      turns: trace.turns,
-      ...(trace.workspaceDiff !== undefined ? { workspaceDiff: trace.workspaceDiff } : {}),
-      ...(trace.events !== undefined ? { events: trace.events } : {}),
-      ...(trace.phases !== undefined ? { phases: trace.phases } : {}),
-      ...(trace.agents !== undefined ? { agents: trace.agents } : {}),
-      ...(trace.context !== undefined ? { context: trace.context } : {}),
-      ...(abortSignal !== undefined ? { abortSignal } : {}),
-    });
-    const record = buildRecord({
-      source: "trace",
-      scenarioId: target.scenarioId,
-      runNumber: RunNumber(1),
-      modelName: "trace",
-      judgeModel: judge.name,
-      startedAt,
-      latencyMs: Date.now() - startMs,
-      judge: judgeResult,
-      turns: trace.turns,
-      ...(trace.workspaceDiff !== undefined ? { workspaceDiff: trace.workspaceDiff } : {}),
-      transcriptPath: "",
-      traceId: trace.traceId,
-    });
-    yield* emitter.emitRun(record);
-    yield* Effect.forEach(obs, (observer) => observer.onRun({ record }), { discard: true });
-    return record;
-  });
 }
 
 function scoreOneBundle(

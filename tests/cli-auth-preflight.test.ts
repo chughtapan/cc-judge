@@ -14,11 +14,6 @@ vi.mock("node:child_process", () => ({
 }));
 
 vi.mock("../src/app/pipeline.js", () => ({
-  scoreTraces: vi.fn(() =>
-    Effect.succeed({
-      runs: [],
-      summary: { total: 0, passed: 0, failed: 0, avgLatencyMs: 0 },
-    })),
   runPlans: vi.fn(() =>
     Effect.succeed({
       runs: [],
@@ -32,7 +27,7 @@ import {
   resetJudgePreflightCacheForTests,
 } from "../src/app/judge-preflight.js";
 import { itEffect } from "./support/effect.js";
-import { captureEnvVar, restoreEnvVar } from "./support/env.js";
+import { captureEnvVar, deleteEnvVar, restoreEnvVar, setEnvVar } from "./support/env.js";
 
 const SAVED_XDG_CACHE_HOME = captureEnvVar("XDG_CACHE_HOME");
 const SAVED_ANTHROPIC_API_KEY = captureEnvVar("ANTHROPIC_API_KEY");
@@ -96,14 +91,13 @@ function installStderrCapture(): { chunks: string[]; restore: () => void } {
   const chunks: string[] = [];
   const original = process.stderr.write.bind(process.stderr);
   type StderrWriteFn = typeof process.stderr.write;
-  type StderrWritable = { write: StderrWriteFn };
   const spy: StderrWriteFn = ((value: string | Uint8Array): boolean => {
     chunks.push(typeof value === "string" ? value : Buffer.from(value).toString("utf8"));
     return true;
   }) as StderrWriteFn;
-  (process.stderr as unknown as StderrWritable).write = spy;
+  Object.defineProperty(process.stderr, "write", { configurable: true, value: spy });
   const restore = (): void => {
-    (process.stderr as unknown as StderrWritable).write = original;
+    Object.defineProperty(process.stderr, "write", { configurable: true, value: original });
   };
   return { chunks, restore };
 }
@@ -113,10 +107,8 @@ describe("main anthropic auth preflight", () => {
     spawnSyncMock.mockReset();
     resetJudgePreflightCacheForTests();
     clearJudgePreflightDiskCacheForTests();
-    process.env["XDG_CACHE_HOME"] = mkdtempSync(
-      path.join(os.tmpdir(), "cc-judge-cli-auth-cache-"),
-    );
-    delete process.env["ANTHROPIC_API_KEY"];
+    setEnvVar("XDG_CACHE_HOME", mkdtempSync(path.join(os.tmpdir(), "cc-judge-cli-auth-cache-")));
+    deleteEnvVar("ANTHROPIC_API_KEY");
   });
 
   afterEach(() => {

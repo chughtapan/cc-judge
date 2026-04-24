@@ -3,24 +3,17 @@
 
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import type {
-  AgentRef,
   Issue,
   IssueSeverity,
-  Phase,
   RunNumber,
   RunSource,
   ScenarioId,
-  TraceEvent,
-  TraceId,
-  Turn,
-  WorkspaceDiff,
 } from "./types.js";
 
 export const ProjectIdSchema = Type.String({ minLength: 1, maxLength: 256 });
 export const RunIdSchema = Type.String({ minLength: 1, maxLength: 256 });
 export const AgentIdSchema = Type.String({ minLength: 1, maxLength: 256 });
 export const ScenarioIdSchema = Type.String({ minLength: 1, maxLength: 256 });
-export const TraceIdSchema = Type.String({ minLength: 1, maxLength: 256 });
 
 export const IssueSeveritySchema = Type.Union([
   Type.Literal("minor"),
@@ -28,10 +21,7 @@ export const IssueSeveritySchema = Type.Union([
   Type.Literal("critical"),
 ]);
 
-export const RunSourceSchema = Type.Union([
-  Type.Literal("bundle"),
-  Type.Literal("trace"),
-]);
+export const RunSourceSchema = Type.Literal("bundle");
 
 // Workspace file path: scenario-relative only. Rejects:
 //   - absolute paths (leading `/` or Windows drive `C:\...`)
@@ -253,7 +243,6 @@ export const RunRecordSchema = Type.Object({
     added: Type.Integer({ minimum: 0 }),
     removed: Type.Integer({ minimum: 0 }),
   }),
-  traceId: Type.Optional(TraceIdSchema),
 });
 
 export interface RunRecord {
@@ -277,7 +266,6 @@ export interface RunRecord {
   readonly cacheWriteTokens: number;
   readonly transcriptPath: string;
   readonly workspaceDiffSummary: { readonly changed: number; readonly added: number; readonly removed: number };
-  readonly traceId?: TraceId;
 }
 
 export const ReportSummarySchema = Type.Object({
@@ -304,38 +292,6 @@ export interface Report {
   readonly runs: ReadonlyArray<RunRecord>;
   readonly summary: ReportSummary;
   readonly artifactsDir?: string;
-}
-
-export const TraceSchema = Type.Object({
-  traceId: TraceIdSchema,
-  scenarioId: Type.Optional(ScenarioIdSchema),
-  name: Type.String(),
-  turns: Type.Array(TurnSchema),
-  workspaceDiff: Type.Optional(WorkspaceDiffSchema),
-  expectedBehavior: Type.String(),
-  validationChecks: Type.Array(Type.String()),
-  metadata: Type.Optional(MetadataSchema),
-  events: Type.Optional(Type.Array(TraceEventSchema)),
-  phases: Type.Optional(Type.Array(PhaseSchema)),
-  agents: Type.Optional(Type.Array(AgentRefSchema)),
-  context: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-  judgeRubric: Type.Optional(Type.String()),
-});
-
-export interface Trace {
-  readonly traceId: TraceId;
-  readonly scenarioId?: ScenarioId;
-  readonly name: string;
-  readonly turns: ReadonlyArray<Turn>;
-  readonly workspaceDiff?: WorkspaceDiff;
-  readonly expectedBehavior: string;
-  readonly validationChecks: ReadonlyArray<string>;
-  readonly metadata?: Readonly<Record<string, string | number | boolean>>;
-  readonly events?: ReadonlyArray<TraceEvent>;
-  readonly phases?: ReadonlyArray<Phase>;
-  readonly agents?: ReadonlyArray<AgentRef>;
-  readonly context?: Readonly<Record<string, unknown>>;
-  readonly judgeRubric?: string;
 }
 
 // Promptfoo results shape (external contract). Minimal: one record per run.
@@ -387,7 +343,6 @@ export type IssueStatic = Static<typeof IssueSchema>;
 export type JudgeResultStatic = Static<typeof JudgeResultSchema>;
 export type RunRecordStatic = Static<typeof RunRecordSchema>;
 export type RunPlanStatic = Static<typeof RunPlanSchema>;
-export type TraceStatic = Static<typeof TraceSchema>;
 export type JudgmentBundleStatic = Static<typeof JudgmentBundleSchema>;
 
 // Helper: format TypeBox error list into short messages for the SchemaInvalid error cause.

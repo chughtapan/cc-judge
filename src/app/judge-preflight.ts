@@ -17,10 +17,14 @@ function shouldPreflightClaudeAuth(judgeBackend: string): boolean {
   if (judgeBackend !== "anthropic") {
     return false;
   }
+  // CLI auth boundary: env presence decides whether the external auth probe is needed.
+  // eslint-disable-next-line agent-code-guard/no-process-env-at-runtime
   return (process.env["ANTHROPIC_API_KEY"] ?? "").trim().length === 0;
 }
 
 function resolveCacheHome(): string {
+  // CLI cache boundary: XDG/OS env is converted to a concrete cache path here.
+  // eslint-disable-next-line agent-code-guard/no-process-env-at-runtime
   const xdgCacheHome = (process.env["XDG_CACHE_HOME"] ?? "").trim();
   if (xdgCacheHome.length > 0) {
     return xdgCacheHome;
@@ -29,6 +33,8 @@ function resolveCacheHome(): string {
     return path.join(os.homedir(), "Library", "Caches");
   }
   if (process.platform === "win32") {
+    // CLI cache boundary: Windows cache location comes from the host env.
+    // eslint-disable-next-line agent-code-guard/no-process-env-at-runtime
     const localAppData = (process.env["LOCALAPPDATA"] ?? "").trim();
     if (localAppData.length > 0) {
       return localAppData;

@@ -5,10 +5,11 @@ import {
   AgentRunTimeoutError,
   AgentStartError,
   BundleBuildError,
+  BundleBuildCause,
   HarnessExecutionError,
+  HarnessExecutionCause,
   RunCoordinationError,
-  type BundleBuildCause,
-  type HarnessExecutionCause,
+  RunCoordinationCause,
 } from "../core/errors.js";
 import { JudgmentBundleSchema, formatSchemaErrors } from "../core/schema.js";
 import {
@@ -183,10 +184,9 @@ export function makeNormalizedBundleSink(
       return Effect.sync(() => {
         if (turn.agentId !== undefined && !knownAgents.has(turn.agentId)) {
           throw new BundleBuildError({
-            cause: {
-              _tag: "UnknownAgent",
+            cause: BundleBuildCause.UnknownAgent({
               agentId: turn.agentId,
-            },
+            }),
           });
         }
         turns.push(turn);
@@ -224,18 +224,16 @@ export function makeNormalizedBundleSink(
       return Effect.sync(() => {
         if (!knownAgents.has(outcome.agentId)) {
           throw new BundleBuildError({
-            cause: {
-              _tag: "UnknownAgent",
+            cause: BundleBuildCause.UnknownAgent({
               agentId: outcome.agentId,
-            },
+            }),
           });
         }
         if (outcomes.has(outcome.agentId)) {
           throw new BundleBuildError({
-            cause: {
-              _tag: "DuplicateOutcome",
+            cause: BundleBuildCause.DuplicateOutcome({
               agentId: outcome.agentId,
-            },
+            }),
           });
         }
         outcomes.set(outcome.agentId, outcome);
@@ -249,10 +247,9 @@ export function makeNormalizedBundleSink(
           .filter((agentId) => !outcomes.has(agentId));
         if (missingOutcomes.length > 0) {
           throw new BundleBuildError({
-            cause: {
-              _tag: "MissingOutcomes",
+            cause: BundleBuildCause.MissingOutcomes({
               agentIds: missingOutcomes,
-            },
+            }),
           });
         }
         const bundle: JudgmentBundle = {
@@ -273,10 +270,9 @@ export function makeNormalizedBundleSink(
         const errors = formatSchemaErrors(Value.Errors(JudgmentBundleSchema, bundle));
         if (errors.length > 0) {
           throw new BundleBuildError({
-            cause: {
-              _tag: "SchemaInvalid",
+            cause: BundleBuildCause.SchemaInvalid({
               errors,
-            },
+            }),
           });
         }
         return bundle;
@@ -294,10 +290,9 @@ function makePreparedRunContext(handles: ReadonlyArray<RuntimeHandle>): Prepared
       if (handle === undefined) {
         return Effect.fail(
           new HarnessExecutionError({
-            cause: {
-              _tag: "MissingRuntimeHandle",
+            cause: HarnessExecutionCause.MissingRuntimeHandle({
               agentId,
-            },
+            }),
           }),
         );
       }
@@ -321,24 +316,27 @@ function runPromptSequence(
     const startedAt = new Date().toISOString();
     let finishedWithFailure = false;
     for (const prompt of config.prompts) {
-      const result = yield* Effect.either(
-        handle.executePrompt(prompt, {
+      const result = yield* handle.executePrompt(prompt, {
           timeoutMs: config.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
           ...(abortSignal !== undefined ? { abortSignal } : {}),
-        }),
-      );
-      if (result._tag === "Left") {
+        }).pipe(
+          Effect.match({
+            onFailure: (error) => ({ success: false as const, error }),
+            onSuccess: (turn) => ({ success: true as const, turn }),
+          }),
+        );
+      if (!result.success) {
         if (abortSignal?.aborted === true) {
-          return yield* Effect.fail(result.left);
+          return yield* Effect.fail(result.error);
         }
         const endedAt = new Date().toISOString();
-        if (result.left._tag === "AgentRunTimeoutError") {
+        if (result.error instanceof AgentRunTimeoutError) {
           yield* sink.recordOutcome({
             agentId,
             status: AGENT_LIFECYCLE_STATUS.TimedOut,
             startedAt,
             endedAt,
-            reason: `agent timed out after ${String(result.left.timeoutMs)}ms`,
+            reason: `agent timed out after ${String(result.error.timeoutMs)}ms`,
           }).pipe(Effect.mapError(bundleBuildToHarness));
         } else {
           yield* sink.recordOutcome({
@@ -346,13 +344,13 @@ function runPromptSequence(
             status: AGENT_LIFECYCLE_STATUS.RuntimeError,
             startedAt,
             endedAt,
-            reason: renderHarnessCause(result.left.cause),
+            reason: renderHarnessCause(result.error.cause),
           }).pipe(Effect.mapError(bundleBuildToHarness));
         }
         finishedWithFailure = true;
         break;
       }
-      const turn = result.right;
+      const turn = result.turn;
       const promptTs = Date.parse(turn.startedAt);
       const safePromptTs = Number.isFinite(promptTs) ? promptTs : Date.now();
       yield* sink.recordTurn({
@@ -410,10 +408,9 @@ function asBundleBuildError(error: unknown): Effect.Effect<never, BundleBuildErr
   }
   return Effect.fail(
     new BundleBuildError({
-      cause: {
-        _tag: "SchemaInvalid",
+      cause: BundleBuildCause.SchemaInvalid({
         errors: [error instanceof Error ? error.message : String(error)],
-      },
+      }),
     }),
   );
 }
@@ -424,46 +421,40 @@ function mapRunCoordinationError(error: unknown): RunCoordinationError {
   }
   if (error instanceof BundleBuildError) {
     return new RunCoordinationError({
-      cause: {
-        _tag: "BundleBuildFailed",
+      cause: RunCoordinationCause.BundleBuildFailed({
         detail: error.cause,
-      },
+      }),
     });
   }
   if (error instanceof HarnessExecutionError) {
     return new RunCoordinationError({
-      cause: {
-        _tag: "HarnessFailed",
+      cause: RunCoordinationCause.HarnessFailed({
         detail: error.cause,
-      },
+      }),
     });
   }
   if (error instanceof AgentStartError) {
     return new RunCoordinationError({
-      cause: {
-        _tag: "AgentStartFailed",
+      cause: RunCoordinationCause.AgentStartFailed({
         agentId: error.agentId ?? "unknown-agent",
         detail: error.cause,
-      },
+      }),
     });
   }
   return new RunCoordinationError({
-    cause: {
-      _tag: "HarnessFailed",
-      detail: {
-        _tag: "ExecutionFailed",
+    cause: RunCoordinationCause.HarnessFailed({
+      detail: HarnessExecutionCause.ExecutionFailed({
         message: error instanceof Error ? error.message : String(error),
-      },
-    },
+      }),
+    }),
   });
 }
 
 function bundleBuildToHarness(error: BundleBuildError): HarnessExecutionError {
   return new HarnessExecutionError({
-    cause: {
-      _tag: "ExecutionFailed",
+    cause: HarnessExecutionCause.ExecutionFailed({
       message: renderBundleBuildCause(error.cause),
-    },
+    }),
   });
 }
 

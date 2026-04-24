@@ -16,7 +16,7 @@ import {
   ensureJudgeReady,
   resetJudgePreflightCacheForTests,
 } from "../src/app/judge-preflight.js";
-import { captureEnvVar, restoreEnvVar } from "./support/env.js";
+import { captureEnvVar, deleteEnvVar, restoreEnvVar, setEnvVar } from "./support/env.js";
 
 const SAVED_XDG_CACHE_HOME = captureEnvVar("XDG_CACHE_HOME");
 const SAVED_ANTHROPIC_API_KEY = captureEnvVar("ANTHROPIC_API_KEY");
@@ -26,10 +26,8 @@ describe("judge preflight cache", () => {
     spawnSyncMock.mockReset();
     resetJudgePreflightCacheForTests();
     clearJudgePreflightDiskCacheForTests();
-    process.env["XDG_CACHE_HOME"] = mkdtempSync(
-      path.join(os.tmpdir(), "cc-judge-auth-cache-"),
-    );
-    delete process.env["ANTHROPIC_API_KEY"];
+    setEnvVar("XDG_CACHE_HOME", mkdtempSync(path.join(os.tmpdir(), "cc-judge-auth-cache-")));
+    deleteEnvVar("ANTHROPIC_API_KEY");
   });
 
   afterEach(() => {
@@ -38,7 +36,7 @@ describe("judge preflight cache", () => {
   });
 
   it("skips preflight entirely when ANTHROPIC_API_KEY is set", () => {
-    process.env["ANTHROPIC_API_KEY"] = "test-key";
+    setEnvVar("ANTHROPIC_API_KEY", "test-key");
 
     expect(ensureJudgeReady("anthropic")).toBeNull();
     expect(spawnSyncMock).not.toHaveBeenCalled();

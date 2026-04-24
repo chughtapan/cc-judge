@@ -1,7 +1,7 @@
 import { describe, expect, vi } from "vitest";
 import { Deferred, Effect, Exit } from "effect";
 import { DefaultRunCoordinator, PromptWorkspaceHarness, type AgentRuntime, type RuntimeHandle } from "../src/runner/index.js";
-import { HarnessExecutionError } from "../src/core/errors.js";
+import { HarnessExecutionCause, HarnessExecutionError } from "../src/core/errors.js";
 import {
   AgentId,
   ProjectId,
@@ -133,10 +133,9 @@ class AbortAwareRuntime implements AgentRuntime {
             resume(
               Effect.fail(
                 new HarnessExecutionError({
-                  cause: {
-                    _tag: "ExecutionFailed",
+                  cause: HarnessExecutionCause.ExecutionFailed({
                     message: "aborted",
-                  },
+                  }),
                 }),
               ),
             );

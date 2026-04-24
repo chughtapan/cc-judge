@@ -9,9 +9,9 @@ import { mkdirSync, appendFileSync, writeFileSync, existsSync, unlinkSync, readF
 import { execFileSync } from "node:child_process";
 import * as path from "node:path";
 import * as YAML from "yaml";
-import { PublishError } from "../core/errors.js";
+import { PublishError, PublishErrorCause } from "../core/errors.js";
 import { RunRecordSchema, type Report, type RunRecord } from "../core/schema.js";
-import { ScenarioId, TraceId, RunNumber } from "../core/types.js";
+import { ScenarioId, RunNumber } from "../core/types.js";
 
 export interface ReportEmitterOpts {
   readonly resultsDir: string;
@@ -104,17 +104,16 @@ function ghAvailable(): boolean {
 function postGithubComment(prNumber: number, body: string): Effect.Effect<void, PublishError, never> {
   return Effect.suspend(() => {
     if (!ghAvailable()) {
-      return Effect.fail(new PublishError({ cause: { _tag: "GhCliMissing" } }));
+      return Effect.fail(new PublishError({ cause: PublishErrorCause.GhCliMissing() }));
     }
     return Effect.tryPromise({
       try: () => runGh(prNumber, body),
       catch: (err) =>
         new PublishError({
-          cause: {
-            _tag: "GhCliFailed",
+          cause: PublishErrorCause.GhCliFailed({
             exitCode: 1,
             stderr: err instanceof Error ? err.message : String(err),
-          },
+          }),
         }),
     });
   });
@@ -185,8 +184,7 @@ export function makeReportEmitter(opts: ReportEmitterOpts): ReportEmitter {
   };
 }
 
-// Helper: read an existing jsonl back into RunRecord[]. Used by scoring CLI
-// to resume from partial output when run with --continue.
+// Helper: read an existing jsonl back into RunRecord[] for report consumers.
 export function readRunsJsonl(resultsDir: string): ReadonlyArray<RunRecord> {
   const jsonlPath = path.join(path.resolve(resultsDir), "results.jsonl");
   if (!existsSync(jsonlPath)) return [];
@@ -205,12 +203,11 @@ export function readRunsJsonl(resultsDir: string): ReadonlyArray<RunRecord> {
     }
     if (!Value.Check(RunRecordSchema, parsed)) continue;
     const decoded = Value.Decode(RunRecordSchema, parsed);
-    const { scenarioId: rawScenarioId, traceId: rawTraceId, runNumber: rawRunNumber, ...rest } = decoded;
+    const { scenarioId: rawScenarioId, runNumber: rawRunNumber, ...rest } = decoded;
     const record: RunRecord = {
       ...rest,
       scenarioId: ScenarioId(rawScenarioId),
       runNumber: RunNumber(rawRunNumber),
-      ...(rawTraceId !== undefined ? { traceId: TraceId(rawTraceId) } : {}),
     };
     out.push(record);
   }

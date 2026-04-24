@@ -12,7 +12,12 @@ vi.mock("node:crypto", () => ({
 }));
 import { Effect } from "effect";
 import { runWithHarness } from "../src/app/pipeline.js";
-import { RunCoordinationError } from "../src/core/errors.js";
+import {
+  AgentStartErrorCause,
+  HarnessExecutionCause,
+  RunCoordinationCause,
+  RunCoordinationError,
+} from "../src/core/errors.js";
 import type { JudgeBackend } from "../src/judge/index.js";
 import {
   AgentId,
@@ -72,14 +77,12 @@ describe("runWithHarness failure folding", () => {
       execute() {
         return Effect.fail(
           new RunCoordinationError({
-            cause: {
-              _tag: "AgentStartFailed",
+            cause: RunCoordinationCause.AgentStartFailed({
               agentId: "alpha",
-              detail: {
-                _tag: "BuildContextMissing",
+              detail: AgentStartErrorCause.BuildContextMissing({
                 path: "/tmp/missing-context",
-              },
-            },
+              }),
+            }),
           }),
         );
       },
@@ -111,13 +114,11 @@ describe("runWithHarness failure folding", () => {
       execute() {
         return Effect.fail(
           new RunCoordinationError({
-            cause: {
-              _tag: "HarnessFailed",
-              detail: {
-                _tag: "ExecutionFailed",
+            cause: RunCoordinationCause.HarnessFailed({
+              detail: HarnessExecutionCause.ExecutionFailed({
                 message: "aborted",
-              },
-            },
+              }),
+            }),
           }),
         );
       },
@@ -147,13 +148,11 @@ describe("runWithHarness failure folding", () => {
       execute() {
         return Effect.fail(
           new RunCoordinationError({
-            cause: {
-              _tag: "HarnessFailed",
-              detail: {
-                _tag: "ExecutionFailed",
+            cause: RunCoordinationCause.HarnessFailed({
+              detail: HarnessExecutionCause.ExecutionFailed({
                 message: "aborted",
-              },
-            },
+              }),
+            }),
           }),
         );
       },

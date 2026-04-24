@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 import { Value } from "@sinclair/typebox/value";
 import * as YAML from "yaml";
-import { BundleDecodeError } from "../core/errors.js";
+import { BundleDecodeCause, BundleDecodeError } from "../core/errors.js";
 import { JudgmentBundleSchema, formatSchemaErrors, type JudgmentBundleStatic } from "../core/schema.js";
 import {
   AgentId,
@@ -25,11 +25,10 @@ function decodeFromParsed(parsed: unknown, originPath: string): Effect.Effect<Ju
   if (errors.length > 0) {
     return Effect.fail(
       new BundleDecodeError({
-        cause: {
-          _tag: "SchemaInvalid",
+        cause: BundleDecodeCause.SchemaInvalid({
           path: originPath,
           errors,
-        },
+        }),
       }),
     );
   }
@@ -79,11 +78,10 @@ function decodeJson(source: string, originPath: string): Effect.Effect<JudgmentB
     try: () => JSON.parse(source),
     catch: (error) =>
       new BundleDecodeError({
-        cause: {
-          _tag: "SchemaInvalid",
+        cause: BundleDecodeCause.SchemaInvalid({
           path: originPath,
           errors: [error instanceof Error ? error.message : String(error)],
-        },
+        }),
       }),
   }).pipe(Effect.flatMap((parsed) => decodeFromParsed(parsed, originPath)));
 }
@@ -93,11 +91,10 @@ function decodeYaml(source: string, originPath: string): Effect.Effect<JudgmentB
     try: () => YAML.parse(source),
     catch: (error) =>
       new BundleDecodeError({
-        cause: {
-          _tag: "SchemaInvalid",
+        cause: BundleDecodeCause.SchemaInvalid({
           path: originPath,
           errors: [error instanceof Error ? error.message : String(error)],
-        },
+        }),
       }),
   }).pipe(Effect.flatMap((parsed) => decodeFromParsed(parsed, originPath)));
 }

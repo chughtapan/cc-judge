@@ -81,6 +81,9 @@ export type PlannedHarnessIngressErrorCause =
       readonly message: string;
     };
 
+export const PlannedHarnessIngressErrorCause =
+  Data.taggedEnum<PlannedHarnessIngressErrorCause>();
+
 const HarnessModuleSpecSchema = Type.Object({
   module: Type.String({ minLength: 1 }),
   export: Type.Optional(Type.String({ minLength: 1 })),
@@ -104,11 +107,10 @@ function schemaInvalid(
   errors: ReadonlyArray<string>,
 ): PlannedHarnessIngressError {
   return new PlannedHarnessIngressError({
-    cause: {
-      _tag: "SchemaInvalid",
+    cause: PlannedHarnessIngressErrorCause.SchemaInvalid({
       path,
       errors,
-    },
+    }),
   });
 }
 
@@ -159,10 +161,9 @@ export function decodePlannedHarnessDocument(
   if (!isRecord(source) || !("harness" in source)) {
     return Effect.fail(
       new PlannedHarnessIngressError({
-        cause: {
-          _tag: "TopLevelNotDocument",
+        cause: PlannedHarnessIngressErrorCause.TopLevelNotDocument({
           path: originPath,
-        },
+        }),
       }),
     );
   }

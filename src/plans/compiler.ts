@@ -5,7 +5,7 @@ import type { HarnessRunOpts } from "../app/opts.js";
 import { runPlans } from "../app/pipeline.js";
 import type { Report } from "../core/schema.js";
 import { loadPlannedHarnessPath } from "./loader.js";
-import { PlannedHarnessIngressError } from "./schema.js";
+import { PlannedHarnessIngressError, PlannedHarnessIngressErrorCause } from "./schema.js";
 import type {
   CompiledPlannedRun,
   ExternalHarnessModule,
@@ -25,12 +25,11 @@ function moduleResolveFailed(
   error: unknown,
 ): PlannedHarnessIngressError {
   return new PlannedHarnessIngressError({
-    cause: {
-      _tag: "ModuleResolveFailed",
+    cause: PlannedHarnessIngressErrorCause.ModuleResolveFailed({
       path: sourcePath,
       module: moduleName,
       message: error instanceof Error ? error.message : String(error),
-    },
+    }),
   });
 }
 
@@ -40,12 +39,11 @@ function moduleImportFailed(
   error: unknown,
 ): PlannedHarnessIngressError {
   return new PlannedHarnessIngressError({
-    cause: {
-      _tag: "ModuleImportFailed",
+    cause: PlannedHarnessIngressErrorCause.ModuleImportFailed({
       path: sourcePath,
       module: moduleName,
       message: error instanceof Error ? error.message : String(error),
-    },
+    }),
   });
 }
 
@@ -55,12 +53,11 @@ function harnessLoadFailed(
   message: string,
 ): PlannedHarnessIngressError {
   return new PlannedHarnessIngressError({
-    cause: {
-      _tag: "HarnessPlanLoadFailed",
+    cause: PlannedHarnessIngressErrorCause.HarnessPlanLoadFailed({
       path: sourcePath,
       module: moduleName,
       message,
-    },
+    }),
   });
 }
 
@@ -116,24 +113,22 @@ function importHarnessModule(
           if (exported === undefined) {
             return Effect.fail(
               new PlannedHarnessIngressError({
-                cause: {
-                  _tag: "ModuleExportMissing",
+                cause: PlannedHarnessIngressErrorCause.ModuleExportMissing({
                   path: document.sourcePath,
                   module: document.document.harness.module,
                   exportName,
-                },
+                }),
               }),
             );
           }
           if (!isExternalHarnessModule(exported)) {
             return Effect.fail(
               new PlannedHarnessIngressError({
-                cause: {
-                  _tag: "InvalidHarnessModule",
+                cause: PlannedHarnessIngressErrorCause.InvalidHarnessModule({
                   path: document.sourcePath,
                   module: document.document.harness.module,
                   exportName,
-                },
+                }),
               }),
             );
           }
