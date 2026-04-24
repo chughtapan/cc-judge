@@ -13,6 +13,9 @@ import {
   runPlannedHarnessPath,
 } from "../src/plans/index.js";
 import { itEffect, EITHER_LEFT } from "./support/effect.js";
+import { installDefaultEnvVar } from "./support/env.js";
+
+installDefaultEnvVar("ANTHROPIC_API_KEY", "test-anthropic-api-key");
 
 let capturedPlannedInputs: ReadonlyArray<unknown> | null = null;
 let capturedHarnessRunOpts: Record<string, unknown> | null = null;
