@@ -16,9 +16,10 @@ import {
   ensureJudgeReady,
   resetJudgePreflightCacheForTests,
 } from "../src/app/judge-preflight.js";
+import { captureEnvVar, restoreEnvVar } from "./support/env.js";
 
-const SAVED_XDG_CACHE_HOME = process.env["XDG_CACHE_HOME"];
-const SAVED_ANTHROPIC_API_KEY = process.env["ANTHROPIC_API_KEY"];
+const SAVED_XDG_CACHE_HOME = captureEnvVar("XDG_CACHE_HOME");
+const SAVED_ANTHROPIC_API_KEY = captureEnvVar("ANTHROPIC_API_KEY");
 
 describe("judge preflight cache", () => {
   beforeEach(() => {
@@ -32,16 +33,8 @@ describe("judge preflight cache", () => {
   });
 
   afterEach(() => {
-    if (SAVED_XDG_CACHE_HOME === undefined) {
-      delete process.env["XDG_CACHE_HOME"];
-    } else {
-      process.env["XDG_CACHE_HOME"] = SAVED_XDG_CACHE_HOME;
-    }
-    if (SAVED_ANTHROPIC_API_KEY === undefined) {
-      delete process.env["ANTHROPIC_API_KEY"];
-    } else {
-      process.env["ANTHROPIC_API_KEY"] = SAVED_ANTHROPIC_API_KEY;
-    }
+    restoreEnvVar("XDG_CACHE_HOME", SAVED_XDG_CACHE_HOME);
+    restoreEnvVar("ANTHROPIC_API_KEY", SAVED_ANTHROPIC_API_KEY);
   });
 
   it("skips preflight entirely when ANTHROPIC_API_KEY is set", () => {

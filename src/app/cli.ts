@@ -14,7 +14,6 @@ import { BraintrustEmitter, PromptfooEmitter, type ObservabilityEmitter } from "
 import { getTraceAdapter, type TraceFormat } from "../emit/trace-adapter.js";
 import { AnthropicJudgeBackend, JUDGE_SYSTEM_PROMPT } from "../judge/index.js";
 import {
-  DockerRuntime,
   SubprocessRuntime,
   type AgentRuntime,
 } from "../runner/index.js";
@@ -27,8 +26,7 @@ export type CliExitCode = 0 | 1 | 2;
 
 export interface RunCliArgs {
   readonly scenarioPath: string;
-  readonly runtime: "docker" | "subprocess";
-  readonly image?: string;
+  readonly runtime?: "subprocess";
   readonly bin?: string;
   readonly judge: string;
   readonly judgeBackend: string;
@@ -76,18 +74,20 @@ function buildObservability(
   return emitters;
 }
 
-function buildRuntime(args: RunCliArgs): Effect.Effect<AgentRuntime, RunnerResolutionError, never> {
-  if (args.runtime === "subprocess") {
-    if (args.bin === undefined) {
-      return Effect.fail(
-        new RunnerResolutionError({
-          cause: { _tag: "InvalidRuntime", value: "subprocess: missing --bin" },
-        }),
-      );
-    }
-    return Effect.succeed(new SubprocessRuntime({ bin: args.bin }));
+function resolveRuntimeOverride(
+  args: RunCliArgs,
+): Effect.Effect<AgentRuntime | undefined, RunnerResolutionError, never> {
+  if (args.runtime === undefined && args.bin === undefined) {
+    return Effect.succeed(undefined);
   }
-  return Effect.succeed(new DockerRuntime());
+  if (args.bin === undefined) {
+    return Effect.fail(
+      new RunnerResolutionError({
+        cause: { _tag: "InvalidRuntime", value: "subprocess: missing --bin" },
+      }),
+    );
+  }
+  return Effect.succeed(new SubprocessRuntime({ bin: args.bin }));
 }
 
 function printReportSummary(
@@ -99,7 +99,7 @@ function printReportSummary(
 
 function runHarnessPlanCommand(args: RunCliArgs): Effect.Effect<CliExitCode, never, never> {
   return Effect.gen(function* () {
-    const runtimeRes = yield* Effect.either(buildRuntime(args));
+    const runtimeRes = yield* Effect.either(resolveRuntimeOverride(args));
     if (runtimeRes._tag === "Left") {
       const cause = runtimeRes.left.cause;
       const detail = cause._tag === "InvalidRuntime" ? cause.value : cause._tag;
@@ -115,12 +115,12 @@ function runHarnessPlanCommand(args: RunCliArgs): Effect.Effect<CliExitCode, nev
     const emitters = buildObservability(args.emitBraintrust, args.emitPromptfoo);
     const runRes = yield* Effect.either(
       runPlannedHarnessPath(args.scenarioPath, {
-        runtime: runtimeRes.right,
         judge,
         resultsDir: args.results,
         concurrency: args.concurrency,
         emitters,
         logLevel: args.logLevel,
+        ...(runtimeRes.right !== undefined ? { runtime: runtimeRes.right } : {}),
         ...(args.githubComment !== undefined ? { githubComment: args.githubComment } : {}),
         ...(args.githubCommentArtifactUrl !== undefined
           ? { githubCommentArtifactUrl: args.githubCommentArtifactUrl }
@@ -235,7 +235,7 @@ function asObject(raw: unknown): YargsParsed {
 export function parseRunArgs(raw: unknown): RunCliArgs {
   const record = asObject(raw);
   const scenarioPath = typeof record["input"] === "string" ? record["input"] : "";
-  const runtime = record["runtime"] === "subprocess" ? "subprocess" : "docker";
+  const runtime = record["runtime"] === "subprocess" ? "subprocess" : undefined;
   const logLevel = (
     record["logLevel"] === "debug" ||
     record["logLevel"] === "info" ||
@@ -246,8 +246,7 @@ export function parseRunArgs(raw: unknown): RunCliArgs {
     : "info";
   return {
     scenarioPath,
-    runtime,
-    ...(typeof record["image"] === "string" ? { image: record["image"] } : {}),
+    ...(runtime !== undefined ? { runtime } : {}),
     ...(typeof record["bin"] === "string" ? { bin: record["bin"] } : {}),
     judge: typeof record["judge"] === "string" ? record["judge"] : "claude-opus-4-7",
     judgeBackend: typeof record["judgeBackend"] === "string" ? record["judgeBackend"] : "anthropic",
@@ -336,8 +335,7 @@ export function main(argv: ReadonlyArray<string>): Effect.Effect<CliExitCode, ne
       .command("run <input>", "Run harness-backed plans", (yargsBuilder) =>
         yargsBuilder
           .positional("input", { type: "string", demandOption: true })
-          .option("runtime", { choices: ["docker", "subprocess"] as const, default: "docker" })
-          .option("image", { type: "string" })
+          .option("runtime", { choices: ["subprocess"] as const })
           .option("bin", { type: "string" })
           .option("judge", { type: "string", default: "claude-opus-4-7" })
           .option("judge-backend", { type: "string", default: "anthropic" })

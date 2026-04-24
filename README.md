@@ -235,13 +235,14 @@ Important options:
 
 Compatibility options:
 
-- `--runtime docker|subprocess`
+- `--runtime subprocess`
 - `--bin <path>`
 
 These are only relevant when the loaded harness defers execution to
 `cc-judge`'s built-in coordinator/runtime path. Systems like MoltZap and Arena
 already provide their own coordinator, so the extra runtime flags are usually
-not needed.
+not needed. If you pass `--bin`, `cc-judge` treats that as a subprocess runtime
+override even without `--runtime subprocess`.
 
 ### `score`
 

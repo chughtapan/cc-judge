@@ -13,20 +13,9 @@ import {
   type ScoreCliArgs,
 } from "../src/app/cli.js";
 import { itEffect } from "./support/effect.js";
+import { installDefaultEnvVar } from "./support/env.js";
 
-const SAVED_ANTHROPIC_API_KEY = process.env["ANTHROPIC_API_KEY"];
-
-beforeEach(() => {
-  process.env["ANTHROPIC_API_KEY"] = "test-anthropic-api-key";
-});
-
-afterEach(() => {
-  if (SAVED_ANTHROPIC_API_KEY === undefined) {
-    delete process.env["ANTHROPIC_API_KEY"];
-    return;
-  }
-  process.env["ANTHROPIC_API_KEY"] = SAVED_ANTHROPIC_API_KEY;
-});
+installDefaultEnvVar("ANTHROPIC_API_KEY", "test-anthropic-api-key");
 
 // ---------------------------------------------------------------------------
 // Mock harness-plan execution / scoreTraces to capture opts passed from cli.ts.
@@ -79,7 +68,6 @@ function tmpScenarioDir(): string {
 function baseArgs(scenarioDir: string): RunCliArgs {
   return {
     scenarioPath: scenarioDir,
-    runtime: "docker",
     judge: "claude-opus-4-7",
     judgeBackend: "anthropic",
     results: mkdtempSync(path.join(os.tmpdir(), "cc-judge-cli-out-")),
@@ -134,8 +122,6 @@ describe("main (yargs dispatch)", () => {
     const code = yield* main([
       "run",
       dir,
-      "--runtime",
-      "docker",
       "--results",
       results,
       "--log-level",
@@ -187,8 +173,6 @@ describe("main (yargs dispatch)", () => {
     const code = yield* main([
       "run",
       dir,
-      "--runtime",
-      "docker",
       "--judge",
       "claude-sonnet-4-6",
       "--judge-backend",
@@ -210,14 +194,13 @@ describe("parseRunArgs", () => {
   it("supplies defaults for every optional field when raw is empty", () => {
     const args = parseRunArgs({});
     expect(args.scenarioPath).toBe("");
-    expect(args.runtime).toBe("docker");
+    expect(args.runtime).toBeUndefined();
     expect(args.judge).toBe("claude-opus-4-7");
     expect(args.judgeBackend).toBe("anthropic");
     expect(args.results).toBe("./eval-results");
     expect(args.concurrency).toBe(1);
     expect(args.logLevel).toBe("info");
     expect(args.emitBraintrust).toBe(false);
-    expect(args.image).toBeUndefined();
     expect(args.bin).toBeUndefined();
     expect(args.githubComment).toBeUndefined();
     expect(args.githubCommentArtifactUrl).toBeUndefined();
@@ -232,11 +215,10 @@ describe("parseRunArgs", () => {
     expect(parseRunArgs([]).scenarioPath).toBe("");
   });
 
-  it("passes through string input + image + bin when provided", () => {
+  it("passes through string input + runtime + bin when provided", () => {
     const args = parseRunArgs({
       input: "/path/to/s",
       runtime: "subprocess",
-      image: "my-img",
       bin: "/usr/bin/claude",
       judge: "claude-custom",
       judgeBackend: "openai",
@@ -251,7 +233,6 @@ describe("parseRunArgs", () => {
     });
     expect(args.scenarioPath).toBe("/path/to/s");
     expect(args.runtime).toBe("subprocess");
-    expect(args.image).toBe("my-img");
     expect(args.bin).toBe("/usr/bin/claude");
     expect(args.judge).toBe("claude-custom");
     expect(args.judgeBackend).toBe("openai");
@@ -265,10 +246,10 @@ describe("parseRunArgs", () => {
     expect(args.emitPromptfoo).toBe("/p.json");
   });
 
-  it("normalizes runtime to docker when value is neither docker nor subprocess", () => {
-    expect(parseRunArgs({ runtime: "wasm" }).runtime).toBe("docker");
-    expect(parseRunArgs({ runtime: null }).runtime).toBe("docker");
-    expect(parseRunArgs({ runtime: "" }).runtime).toBe("docker");
+  it("drops runtime override when value is neither docker nor subprocess", () => {
+    expect(parseRunArgs({ runtime: "wasm" }).runtime).toBeUndefined();
+    expect(parseRunArgs({ runtime: null }).runtime).toBeUndefined();
+    expect(parseRunArgs({ runtime: "" }).runtime).toBeUndefined();
   });
 
   it("normalizes logLevel to info when value is not one of the four accepted levels", () => {
@@ -284,16 +265,14 @@ describe("parseRunArgs", () => {
     expect(parseRunArgs({ logLevel: "error" }).logLevel).toBe("error");
   });
 
-  it("drops image / bin / githubComment when the wrong type", () => {
+  it("drops bin / githubComment when the wrong type", () => {
     const args = parseRunArgs({
-      image: 42,
       bin: null,
       githubComment: "not-a-number",
       githubCommentArtifactUrl: 99,
       totalTimeoutMs: "not-a-number",
       emitPromptfoo: 100,
     });
-    expect(args.image).toBeUndefined();
     expect(args.bin).toBeUndefined();
     expect(args.githubComment).toBeUndefined();
     expect(args.githubCommentArtifactUrl).toBeUndefined();
@@ -411,8 +390,6 @@ const STUB_PROMPTFOO_OUTPUT = "/tmp/cc-judge-promptfoo-stub.json";
 function stubRunArgs(scenarioDir: string, overrides: Partial<RunCliArgs> = {}): RunCliArgs {
   return {
     scenarioPath: scenarioDir,
-    runtime: "subprocess",
-    bin: BIN_TRUE,
     judge: "claude-opus-4-7",
     judgeBackend: "anthropic",
     results: mkdtempSync(path.join(os.tmpdir(), "cc-judge-stub-out-")),
@@ -742,14 +719,12 @@ describe("parseRunArgs logLevel each position in OR chain", () => {
 // ──────────────────────────────────────────────────────────────────────────────
 
 describe("main (yargs) option names and defaults", () => {
-  itEffect("run subcommand accepts a harness input path", function* () {
+  itEffect("run subcommand accepts a harness input path without a runtime override", function* () {
     const dir = tmpScenarioDir();
     const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-si-"));
     const code = yield* main([
       "run",
       dir,
-      "--runtime", "subprocess",
-      "--bin", BIN_TRUE,
       "--results", results,
       "--log-level", "error",
     ]);
@@ -762,8 +737,6 @@ describe("main (yargs) option names and defaults", () => {
     const code = yield* main([
       "run",
       dir,
-      "--runtime", "subprocess",
-      "--bin", BIN_TRUE,
       "--github-comment", "1",
       "--results", results,
       "--log-level", "error",
@@ -777,8 +750,6 @@ describe("main (yargs) option names and defaults", () => {
     const code = yield* main([
       "run",
       dir,
-      "--runtime", "subprocess",
-      "--bin", BIN_TRUE,
       "--github-comment-artifact-url", "https://example.com/art",
       "--results", results,
       "--log-level", "error",
@@ -792,8 +763,6 @@ describe("main (yargs) option names and defaults", () => {
     const code = yield* main([
       "run",
       dir,
-      "--runtime", "subprocess",
-      "--bin", BIN_TRUE,
       "--total-timeout-ms", "60000",
       "--results", results,
       "--log-level", "error",
@@ -807,8 +776,6 @@ describe("main (yargs) option names and defaults", () => {
     const code = yield* main([
       "run",
       dir,
-      "--runtime", "subprocess",
-      "--bin", BIN_TRUE,
       "--results", results,
       "--log-level", "error",
     ]);
@@ -821,8 +788,6 @@ describe("main (yargs) option names and defaults", () => {
     const code = yield* main([
       "run",
       dir,
-      "--runtime", "subprocess",
-      "--bin", BIN_TRUE,
       "--emit-promptfoo", STUB_PROMPTFOO_OUTPUT,
       "--results", results,
       "--log-level", "error",
@@ -836,8 +801,6 @@ describe("main (yargs) option names and defaults", () => {
     const code = yield* main([
       "run",
       dir,
-      "--runtime", "subprocess",
-      "--bin", BIN_TRUE,
       "--concurrency", "1",
       "--results", results,
       "--log-level", "debug",
@@ -851,8 +814,6 @@ describe("main (yargs) option names and defaults", () => {
     const code = yield* main([
       "run",
       dir,
-      "--runtime", "subprocess",
-      "--bin", BIN_TRUE,
       "--results", results,
       "--log-level", "info",
     ]);
@@ -1004,33 +965,12 @@ describe("main (yargs) option names and defaults", () => {
     expect(code).toBe(EXIT_FATAL);
   });
 
-  itEffect("run subcommand: --image option name resolves", function* () {
-    const dir = tmpScenarioDir();
-    const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-img-"));
-    // With --runtime docker + --image set, runner resolves but start() will fail
-    // (no docker available in test env). Exit 0 or 1 is acceptable.
-    const { restore } = installStderrCapture();
-    const code = yield* Effect.ensuring(
-      main([
-        "run",
-        dir,
-        "--runtime", "docker",
-        "--image", "cc-judge-nonexistent-image-xyz",
-        "--results", results,
-        "--log-level", "error",
-      ]),
-      Effect.sync(restore),
-    );
-    expect(code).toBe(EXIT_SUCCESS);
-  });
-
   itEffect("run subcommand: --bin option name resolves", function* () {
     const dir = tmpScenarioDir();
     const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-bin-"));
     const code = yield* main([
       "run",
       dir,
-      "--runtime", "subprocess",
       "--bin", BIN_TRUE,
       "--results", results,
       "--log-level", "error",
@@ -1077,8 +1017,6 @@ describe("main (yargs) option names and defaults", () => {
     const code = yield* main([
       "run",
       dir,
-      "--runtime", "subprocess",
-      "--bin", BIN_TRUE,
       "--results", results,
       "--log-level", "warn",
     ]);
@@ -1102,7 +1040,7 @@ describe("main (yargs) option names and defaults", () => {
     expect(code).toBe(EXIT_FATAL);
   });
 
-  itEffect("run: --runtime subprocess (default docker changed to subprocess)", function* () {
+  itEffect("run: --runtime subprocess selects the subprocess runtime override", function* () {
     const dir = tmpScenarioDir();
     const results = mkdtempSync(path.join(os.tmpdir(), "cc-judge-main-rt-"));
     const code = yield* main([
@@ -1292,17 +1230,25 @@ describe("runCommand passes optional opts to the harness run path (mock capture)
     expect(capturedRunOpts!["totalTimeoutMs"]).toBeUndefined();
   });
 
-  itEffect("base fields (runtime, judge, resultsDir, concurrency, logLevel, emitters) are always present", function* () {
+  itEffect("base fields (judge, resultsDir, concurrency, logLevel, emitters) are always present", function* () {
     const dir = tmpScenarioDir();
     const args = stubRunArgs(dir);
     yield* runCommand(args);
     expect(capturedRunOpts).not.toBeNull();
-    expect(capturedRunOpts!["runtime"]).toBeDefined();
+    expect(capturedRunOpts!["runtime"]).toBeUndefined();
     expect(capturedRunOpts!["judge"]).toBeDefined();
     expect(capturedRunOpts!["resultsDir"]).toBeDefined();
     expect(capturedRunOpts!["concurrency"]).toBeDefined();
     expect(capturedRunOpts!["logLevel"]).toBe(MOCK_LOG_LEVEL_ERROR);
     expect(capturedRunOpts!["emitters"]).toBeDefined();
+  });
+
+  itEffect("explicit subprocess runtime override is forwarded when runtime and bin are provided", function* () {
+    const dir = tmpScenarioDir();
+    const args = stubRunArgs(dir, { runtime: "subprocess", bin: BIN_TRUE });
+    yield* runCommand(args);
+    expect(capturedRunOpts).not.toBeNull();
+    expect(capturedRunOpts!["runtime"]).toMatchObject({ kind: "subprocess" });
   });
 });
 

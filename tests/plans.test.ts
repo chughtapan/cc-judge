@@ -13,6 +13,9 @@ import {
   runPlannedHarnessPath,
 } from "../src/plans/index.js";
 import { itEffect, EITHER_LEFT } from "./support/effect.js";
+import { installDefaultEnvVar } from "./support/env.js";
+
+installDefaultEnvVar("ANTHROPIC_API_KEY", "test-anthropic-api-key");
 
 let capturedPlannedInputs: ReadonlyArray<unknown> | null = null;
 let capturedHarnessRunOpts: Record<string, unknown> | null = null;
@@ -295,7 +298,7 @@ describe("planned harness compiler + cli ingress", () => {
     const { chunks, restore } = installStderrCapture();
 
     const code = yield* Effect.ensuring(
-      main(["run", badPath, "--runtime", "subprocess", "--bin", "/bin/echo", "--log-level", "error"]),
+      main(["run", badPath, "--log-level", "error"]),
       Effect.sync(restore),
     );
 
