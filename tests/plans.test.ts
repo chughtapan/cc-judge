@@ -295,7 +295,7 @@ describe("planned harness compiler + cli ingress", () => {
     const { chunks, restore } = installStderrCapture();
 
     const code = yield* Effect.ensuring(
-      main(["run", badPath, "--runtime", "subprocess", "--bin", "/bin/echo", "--log-level", "error"]),
+      main(["run", badPath, "--log-level", "error"]),
       Effect.sync(restore),
     );
 
