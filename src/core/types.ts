@@ -7,23 +7,13 @@ export type ProjectId = string & Brand.Brand<"ProjectId">;
 export type RunId = string & Brand.Brand<"RunId">;
 export type AgentId = string & Brand.Brand<"AgentId">;
 export type ScenarioId = string & Brand.Brand<"ScenarioId">;
-export type TraceId = string & Brand.Brand<"TraceId">;
 export type RunNumber = number & Brand.Brand<"RunNumber">;
 
 export const ProjectId = Brand.nominal<ProjectId>();
 export const RunId = Brand.nominal<RunId>();
 export const AgentId = Brand.nominal<AgentId>();
 export const ScenarioId = Brand.nominal<ScenarioId>();
-export const TraceId = Brand.nominal<TraceId>();
 export const RunNumber = Brand.nominal<RunNumber>();
-
-// Explicit, named conversion from TraceId to ScenarioId. Used only by the
-// trace-scoring path when a Trace omits scenarioId so the judgment target still
-// has a stable identifier. Naming the conversion makes the brand crossing
-// auditable (Principle 1: no silent brand laundering).
-export function scenarioIdFromTraceId(t: TraceId): ScenarioId {
-  return ScenarioId(t);
-}
 
 export type IssueSeverity = "minor" | "significant" | "critical";
 
@@ -33,11 +23,10 @@ export const ISSUE_SEVERITY = {
   Critical: "critical",
 } as const satisfies { readonly [K in Capitalize<IssueSeverity>]: Uncapitalize<K> };
 
-export type RunSource = "bundle" | "trace";
+export type RunSource = "bundle";
 
 export const RUN_SOURCE = {
   Bundle: "bundle",
-  Trace: "trace",
 } as const satisfies { readonly [K in Capitalize<RunSource>]: Uncapitalize<K> };
 
 export type LogLevel = "debug" | "info" | "warn" | "error";

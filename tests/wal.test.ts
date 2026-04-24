@@ -199,7 +199,7 @@ describe("WAL seq monotonicity (Effect.Semaphore)", () => {
         yield* Effect.forEach(
           indices,
           (i) => handle.append({ kind: WAL_LINE_KIND.Event, payload: { i } }),
-          { concurrency: "unbounded" },
+          { concurrency: EVENT_COUNT_CONCURRENT },
         );
         yield* handle.close({ status: RUN_CLOSE_STATUS.Completed });
       }));

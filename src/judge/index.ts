@@ -3,7 +3,7 @@
 // into a JudgeResult with pass=false, overallSeverity="critical", and the
 // retry count reflected on the record so observers can see how hard we tried.
 
-import { Effect } from "effect";
+import { Data, Effect } from "effect";
 import { Value } from "@sinclair/typebox/value";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type {
@@ -291,19 +291,16 @@ function collectAssistantText(messages: ReadonlyArray<SDKMessage>): ParsedAssist
 
 // Tagged errors used internally by the judge pipeline. None escape — they are
 // folded into a synthetic JudgeResult before leaving `judge()` (invariant #3).
-class JudgeAttemptError {
-  readonly _tag = "JudgeAttemptError" as const;
-  constructor(
-    readonly kind:
-      | "SdkFailed"
-      | "NoOutput"
-      | "MalformedJson"
-      | "SchemaInvalid"
-      | "Timeout"
-      | "ResultError",
-    readonly message: string,
-  ) {}
-}
+class JudgeAttemptError extends Data.TaggedError("JudgeAttemptError")<{
+  readonly kind:
+    | "SdkFailed"
+    | "NoOutput"
+    | "MalformedJson"
+    | "SchemaInvalid"
+    | "Timeout"
+    | "ResultError";
+  readonly message: string;
+}> {}
 
 function collectSdkMessages(
   prompt: string,
@@ -331,14 +328,18 @@ function collectSdkMessages(
     const nextWithTimeout = Effect.tryPromise({
       try: () => iter.next(),
       catch: (error) =>
-        new JudgeAttemptError(
-          "SdkFailed",
-          error instanceof Error ? error.message : String(error),
-        ),
+        new JudgeAttemptError({
+          kind: "SdkFailed",
+          message: error instanceof Error ? error.message : String(error),
+        }),
     }).pipe(
       Effect.timeoutFail({
         duration: Math.max(1, deadline - Date.now()),
-        onTimeout: () => new JudgeAttemptError("Timeout", `per-attempt timeout after ${timeoutMs}ms`),
+        onTimeout: () =>
+          new JudgeAttemptError({
+            kind: "Timeout",
+            message: `per-attempt timeout after ${timeoutMs}ms`,
+          }),
       }),
       Effect.tapError((error) =>
         error.kind === "Timeout"
@@ -382,16 +383,21 @@ function parseVerdict(parsed: ParsedAssistantResult): Effect.Effect<JudgeResult,
   } else {
     const raw = extractJsonText(parsed.text);
     if (raw.length === 0) {
-      return Effect.fail(new JudgeAttemptError("NoOutput", "judge model returned empty output"));
+      return Effect.fail(
+        new JudgeAttemptError({
+          kind: "NoOutput",
+          message: "judge model returned empty output",
+        }),
+      );
     }
     try {
       value = JSON.parse(raw);
     } catch (err) {
       return Effect.fail(
-        new JudgeAttemptError(
-          "MalformedJson",
-          err instanceof Error ? err.message : String(err),
-        ),
+        new JudgeAttemptError({
+          kind: "MalformedJson",
+          message: err instanceof Error ? err.message : String(err),
+        }),
       );
     }
   }
@@ -403,7 +409,12 @@ function buildResult(
   retryCount: number,
 ): Effect.Effect<JudgeResult, JudgeAttemptError, never> {
   if (typeof value !== "object" || value === null) {
-    return Effect.fail(new JudgeAttemptError("SchemaInvalid", "verdict is not an object"));
+    return Effect.fail(
+      new JudgeAttemptError({
+        kind: "SchemaInvalid",
+        message: "verdict is not an object",
+      }),
+    );
   }
   const raw: RawJudgeVerdict = value;
   const candidate = {
@@ -419,7 +430,12 @@ function buildResult(
     errs.push(`${e.path} ${e.message}`);
   }
   if (errs.length > 0) {
-    return Effect.fail(new JudgeAttemptError("SchemaInvalid", errs.join("; ")));
+    return Effect.fail(
+      new JudgeAttemptError({
+        kind: "SchemaInvalid",
+        message: errs.join("; "),
+      }),
+    );
   }
   const decoded = Value.Decode(JudgeResultSchema, candidate);
   const result: JudgeResult = {
@@ -511,10 +527,10 @@ function runAttempt(
       for (const m of messages) {
         if (m.type === "result" && m.subtype !== "success") {
           return Effect.fail(
-            new JudgeAttemptError(
-              "ResultError",
-              m.errors.length > 0 ? m.errors.join("; ") : m.subtype,
-            ),
+            new JudgeAttemptError({
+              kind: "ResultError",
+              message: m.errors.length > 0 ? m.errors.join("; ") : m.subtype,
+            }),
           );
         }
       }
@@ -553,17 +569,31 @@ export class AnthropicJudgeBackend implements JudgeBackend {
 
     const loop = Effect.gen(function* () {
       let attempt = 0;
-      let lastErr: JudgeAttemptError = new JudgeAttemptError("NoOutput", "no attempts ran");
+      let lastErr: JudgeAttemptError = new JudgeAttemptError({
+        kind: "NoOutput",
+        message: "no attempts ran",
+      });
       while (attempt <= schedule.length) {
         if (attempt > 0) {
           const delay = schedule[attempt - 1] ?? 0;
           yield* sleepEff(delay);
         }
-        const res = yield* Effect.either(
-          runAttempt(input, effectivePrompt, model, maxTurns, timeoutMs, input.abortSignal, attempt),
+        const result = yield* runAttempt(
+          input,
+          effectivePrompt,
+          model,
+          maxTurns,
+          timeoutMs,
+          input.abortSignal,
+          attempt,
+        ).pipe(
+          Effect.match({
+            onFailure: (error) => ({ success: false as const, error }),
+            onSuccess: (verdict) => ({ success: true as const, verdict }),
+          }),
         );
-        if (res._tag === "Right") return res.right;
-        lastErr = res.left;
+        if (result.success) return result.verdict;
+        lastErr = result.error;
         if (lastErr.kind === "ResultError") {
           return criticalFallback(lastErr, attempt);
         }

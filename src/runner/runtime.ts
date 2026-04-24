@@ -14,6 +14,8 @@ import * as path from "node:path";
 import {
   AgentRunTimeoutError,
   AgentStartError,
+  AgentStartErrorCause,
+  HarnessExecutionCause,
   HarnessExecutionError,
 } from "../core/errors.js";
 import type {
@@ -172,10 +174,9 @@ export class SubprocessRuntime implements AgentRuntime {
           new AgentStartError({
             scenarioId: plan.scenarioId,
             agentId: agent.id,
-            cause: {
-              _tag: "BinaryNotFound",
+            cause: AgentStartErrorCause.BinaryNotFound({
               path: this.#opts.bin,
-            },
+            }),
           }),
         );
       }
@@ -221,10 +222,9 @@ function makeEmptyWorkspace(
     catch: (error) =>
       new AgentStartError({
         scenarioId,
-        cause: {
-          _tag: "WorkspaceSetupFailed",
+        cause: AgentStartErrorCause.WorkspaceSetupFailed({
           message: error instanceof Error ? error.message : String(error),
-        },
+        }),
       }),
   });
 }
@@ -320,12 +320,11 @@ function writeWorkspaceFiles(
     },
     catch: (error) =>
       new HarnessExecutionError({
-        cause: {
-          _tag: "ExecutionFailed",
+        cause: HarnessExecutionCause.ExecutionFailed({
           message: error instanceof PathEscapeSignal
             ? `workspace path escapes root for agent ${agent.id}: ${error.wfPath}`
             : `${plan.scenarioId} workspace write failed: ${error instanceof Error ? error.message : String(error)}`,
-        },
+        }),
       }),
   });
 }
@@ -372,6 +371,8 @@ function runSubprocessPrompt(
   abortSignal?: AbortSignal,
 ): Effect.Effect<Turn, AgentRunTimeoutError | HarnessExecutionError, never> {
   const args = [...(opts.extraArgs ?? DEFAULT_CLAUDE_ARGS), prompt];
+  // Runtime boundary: inherit the host environment unless the caller supplied one.
+  // eslint-disable-next-line agent-code-guard/no-process-env-at-runtime
   const env = opts.env !== undefined ? { ...process.env, ...opts.env } : process.env;
   return runPromptProcess({
     cmd: opts.bin,
@@ -414,10 +415,9 @@ function runPromptProcess(params: {
     let stderr = "";
     const abortError = () =>
       new HarnessExecutionError({
-        cause: {
-          _tag: "ExecutionFailed",
+        cause: HarnessExecutionCause.ExecutionFailed({
           message: `${params.agent.id} prompt execution aborted`,
-        },
+        }),
       });
     const cleanup = () => {
       if (timer !== undefined) {
@@ -503,10 +503,9 @@ function runPromptProcess(params: {
       resume(
         Effect.fail(
           new HarnessExecutionError({
-            cause: {
-              _tag: "ExecutionFailed",
+            cause: HarnessExecutionCause.ExecutionFailed({
               message: `${params.agent.id} prompt execution failed: ${error.message}`,
-            },
+            }),
           }),
         ),
       );
@@ -537,10 +536,9 @@ function buildDockerImage(
       new AgentStartError({
         scenarioId: plan.scenarioId,
         agentId: agent.id,
-        cause: {
-          _tag: "DockerBuildFailed",
+        cause: AgentStartErrorCause.DockerBuildFailed({
           message: `expected DockerBuildArtifact, received ${artifact._tag}`,
-        },
+        }),
       }),
     );
   }
@@ -551,10 +549,9 @@ function buildDockerImage(
         throw new AgentStartError({
           scenarioId: plan.scenarioId,
           agentId: agent.id,
-          cause: {
-            _tag: "BuildContextMissing",
+          cause: AgentStartErrorCause.BuildContextMissing({
             path: contextPath,
-          },
+          }),
         });
       }
       const autoTag = `cc-judge-${sanitizeId(plan.scenarioId)}-${sanitizeId(agent.id)}-${Date.now()}`;
@@ -584,10 +581,9 @@ function buildDockerImage(
       return new AgentStartError({
         scenarioId: plan.scenarioId,
         agentId: agent.id,
-        cause: {
-          _tag: "DockerBuildFailed",
+        cause: AgentStartErrorCause.DockerBuildFailed({
           message: error instanceof Error ? error.message : String(error),
-        },
+        }),
       });
     },
   });
@@ -603,10 +599,9 @@ function ensureDockerImage(
       new AgentStartError({
         scenarioId: plan.scenarioId,
         agentId: agent.id,
-        cause: {
-          _tag: "ImageMissing",
+        cause: AgentStartErrorCause.ImageMissing({
           image: `invalid-artifact:${artifact._tag}`,
-        },
+        }),
       }),
     );
   }
@@ -622,11 +617,10 @@ function ensureDockerImage(
           throw new AgentStartError({
             scenarioId: plan.scenarioId,
             agentId: agent.id,
-            cause: {
-              _tag: "ImagePullFailed",
+            cause: AgentStartErrorCause.ImagePullFailed({
               image,
               message: error instanceof Error ? error.message : String(error),
-            },
+            }),
           });
         }
       }
@@ -634,20 +628,18 @@ function ensureDockerImage(
         throw new AgentStartError({
           scenarioId: plan.scenarioId,
           agentId: agent.id,
-          cause: {
-            _tag: "ImageMissing",
+          cause: AgentStartErrorCause.ImageMissing({
             image,
-          },
+          }),
         });
       }
       if (!dockerImageExists(image)) {
         throw new AgentStartError({
           scenarioId: plan.scenarioId,
           agentId: agent.id,
-          cause: {
-            _tag: "ImageMissing",
+          cause: AgentStartErrorCause.ImageMissing({
             image,
-          },
+          }),
         });
       }
       return {
@@ -662,10 +654,9 @@ function ensureDockerImage(
       return new AgentStartError({
         scenarioId: plan.scenarioId,
         agentId: agent.id,
-        cause: {
-          _tag: "ImageMissing",
+        cause: AgentStartErrorCause.ImageMissing({
           image: artifact.image,
-        },
+        }),
       });
     },
   });
@@ -706,10 +697,9 @@ function createDockerContainer(
       new AgentStartError({
         scenarioId: plan.scenarioId,
         agentId: agent.id,
-        cause: {
-          _tag: "ContainerStartFailed",
+        cause: AgentStartErrorCause.ContainerStartFailed({
           message: error instanceof Error ? error.message : String(error),
-        },
+        }),
       }),
   });
 }

@@ -1,30 +1,15 @@
 # cc-judge
 
-TypeScript-first CLI + SDK for two jobs:
-
-- run harness-backed plans against real systems
-- score already-captured traces or bundles with Claude
-
-`cc-judge` is the generic layer. It owns plan loading, report emission, scoring,
-and the CLI. Your system owns the harness module that knows how to boot the
-target app and capture a canonical trace.
+TypeScript-first CLI + SDK for planned Claude Code harness runs, LLM bundle judging, and `summary.md` + `results.jsonl` reports. Telemetry can fan out to Braintrust and Promptfoo through pluggable emitters.
 
 ## Prerequisites
 
 - Node.js 20.11+
 - `pnpm` 9+
-- Claude judge auth:
-  - `claude auth login`, or
-  - `ANTHROPIC_API_KEY=...`
+- Claude judge auth through `claude auth login` or `ANTHROPIC_API_KEY=...`
+- Docker, if your harness launches Docker workloads
 
-If you use a harness that launches Docker workloads, Docker must also be
-available.
-
-When `--judge-backend anthropic` is active and `ANTHROPIC_API_KEY` is not set,
-`cc-judge` runs `claude auth status` before `run` or `score`. Successful auth
-checks are cached for 24 hours under the user cache directory (for example
-`$XDG_CACHE_HOME/cc-judge` or `~/.cache/cc-judge`) so repeated invocations do
-not keep probing Claude auth.
+When `--judge-backend anthropic` is active and `ANTHROPIC_API_KEY` is not set, `cc-judge` runs `claude auth status` before `run`. Successful checks are cached for 24 hours under the user cache directory.
 
 ## Install
 
@@ -34,28 +19,7 @@ pnpm add cc-judge
 
 ## Quickstart
 
-### 1. Authenticate the judge
-
-```bash
-claude auth login
-# or:
-export ANTHROPIC_API_KEY=sk-ant-...
-```
-
-### 2. Create a harness-backed plan
-
-`cc-judge run` now expects a shared plan envelope plus a harness module.
-The module path resolves relative to the plan file.
-
-Typical layout:
-
-```text
-your-repo/
-  plans/
-    demo.yaml
-  dist/
-    demo-harness.js
-```
+Create a harness-backed plan:
 
 ```yaml
 project: moltzap
@@ -77,19 +41,25 @@ harness:
       setupMessage: Hello, can you explain how MoltZap conversations work?
 ```
 
-Required top-level fields:
+Run it:
 
-- `project`: stable project identifier
-- `scenarioId`: stable scenario identifier
-- `name`: human-readable name shown in reports
-- `description`: scenario description shown in reports
-- `requirements.expectedBehavior`: free-form success description for the judge
-- `requirements.validationChecks`: concrete checklist for the judge
-- `harness.module`: module path relative to the plan file
-- `harness.payload`: harness-specific configuration blob
+```bash
+cc-judge run ./plans/**/*.yaml --results ./eval-results --log-level info
+```
 
-The harness module must export `load(args)` as the default export unless you
-set `harness.export`.
+Successful and failed runs both emit:
+
+```text
+eval-results/
+  summary.md
+  results.jsonl
+  details/
+    <scenario-id>.<run-number>.yaml
+```
+
+## Harness Modules
+
+The plan's `harness.module` path resolves relative to the plan file. The module must export `load(args)` as its default export unless the plan sets `harness.export`.
 
 Minimal module shape:
 
@@ -130,91 +100,12 @@ export default {
 };
 ```
 
-For real systems, the harness usually returns either:
-
-- `plan + harness + runtime`, or
-- `plan + harness + coordinator`
-
-MoltZap and Arena both use the second form.
-
-### 3. Run the plan
-
-```bash
-cc-judge run ./plans/**/*.yaml --results ./eval-results --log-level info
-```
-
-Successful and failed runs both emit the same artifact set:
-
-```text
-eval-results/
-  summary.md
-  results.jsonl
-  details/
-    <scenario-id>.<run-number>.yaml
-```
-
-Exit codes:
-
-- `0`: every run passed
-- `1`: one or more runs executed but failed judgment
-- `2`: fatal operator error such as bad input, missing auth, or harness load failure
-
-## Score existing traces
-
-If you already have canonical traces, use `score` directly.
-
-Minimal canonical trace example:
-
-```json
-{
-  "traceId": "trace-1",
-  "scenarioId": "demo-trace",
-  "name": "multi-agent-game",
-  "turns": [],
-  "expectedBehavior": "game completes",
-  "validationChecks": ["all players participate"],
-  "events": [
-    {
-      "type": "message",
-      "from": "Agent-1",
-      "channel": "town_square",
-      "text": "Hello",
-      "ts": 1000
-    }
-  ]
-}
-```
-
-Optional rubric file:
-
-```md
-Judge the run strictly.
-Fail the run if the agent returns an auth error, empty output, or an off-topic answer.
-```
-
-Run scoring:
-
-```bash
-cc-judge score ./traces/**/*.json \
-  --results ./eval-results \
-  --judge-rubric ./rubric.md \
-  --log-level info
-```
-
-Supported trace formats:
-
-- `canonical` (default)
-- `otel`
-
-Use `canonical` when you already have `cc-judge`-shaped trace JSON/YAML.
-Use `otel` when your source system already emits OTel spans and you want the
-adapter to normalize them into the canonical trace shape.
+For real systems, the harness usually returns either `plan + harness + runtime` or `plan + harness + coordinator`.
 
 ## CLI
 
 ```text
 cc-judge run <input>
-cc-judge score <traces>
 cc-judge inspect <run-id>
 ```
 
@@ -238,31 +129,23 @@ Compatibility options:
 - `--runtime subprocess`
 - `--bin <path>`
 
-These are only relevant when the loaded harness defers execution to
-`cc-judge`'s built-in coordinator/runtime path. Systems like MoltZap and Arena
-already provide their own coordinator, so the extra runtime flags are usually
-not needed. If you pass `--bin`, `cc-judge` treats that as a subprocess runtime
-override even without `--runtime subprocess`.
+These are only relevant when the loaded harness defers execution to `cc-judge`'s built-in coordinator/runtime path.
 
-### `score`
+### `inspect`
 
-Important options:
+`inspect` reads the WAL timeline for one run id:
 
-- `--trace-format canonical|otel`
-- `--results <dir>`
-- `--judge <model>`
-- `--judge-rubric <path>`
-- `--concurrency <n>`
-- `--log-level debug|info|warn|error`
-- `--total-timeout-ms <ms>`
+```bash
+cc-judge inspect <run-id> --results ./eval-results
+```
 
 ## SDK
 
 Main entrypoints:
 
-- `runPlans(...)` for harness-backed planned runs
-- `scoreTraces(...)`
-- `scoreBundles(...)`
+- `runPlans(...)` for harness-backed plan files
+- `runWithHarness(...)` for direct harness execution
+- `scoreBundles(...)` when you already have normalized `JudgmentBundle` values
 
 Harness ingress types:
 
@@ -270,13 +153,7 @@ Harness ingress types:
 - `ExternalHarnessModule`
 - `HarnessPlanLoadArgs`
 
-Which entrypoint to use:
-
-- `runPlans(...)`: harness-backed planned runs
-- `scoreTraces(...)`: scoring-only path for canonical or OTel traces
-- `scoreBundles(...)`: scoring-only path when you already have normalized bundles
-
-## Local development
+## Local Development
 
 ```bash
 pnpm lint
@@ -291,15 +168,15 @@ Mutation testing:
 pnpm mutation
 ```
 
-## What is verified here
+## Verified Surfaces
 
 Current tree coverage includes:
 
 - planned harness YAML ingress
 - module resolution/import/load failures
 - timeout cleanup in the judge and pipeline layers
-- canonical and OTel trace decoding
-- bundle and trace scoring
+- bundle scoring
+- report, WAL, and observability emitters
 
 ## License
 

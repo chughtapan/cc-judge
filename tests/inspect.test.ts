@@ -14,14 +14,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { WAL_LINE_KIND, WAL_LINE_VERSION } from "../src/emit/wal.js";
 import { inspectRun, InspectError } from "../src/app/inspect.js";
-import { itEffect } from "./support/effect.js";
+import { expectLeft, itEffect } from "./support/effect.js";
 
 // ---------------------------------------------------------------------------
 // I/O capture helpers (mirrors cli.test.ts installStderrCapture pattern).
 // ---------------------------------------------------------------------------
 
 type WriteFn = typeof process.stdout.write;
-type Writable = { write: WriteFn };
 
 interface CaptureHandle {
   readonly chunks: string[];
@@ -35,9 +34,9 @@ function captureStream(stream: NodeJS.WriteStream): CaptureHandle {
     chunks.push(typeof s === "string" ? s : Buffer.from(s).toString("utf8"));
     return true;
   }) as WriteFn;
-  (stream as unknown as Writable).write = spy;
+  Object.defineProperty(stream, "write", { configurable: true, value: spy });
   const restore = (): void => {
-    (stream as unknown as Writable).write = original;
+    Object.defineProperty(stream, "write", { configurable: true, value: original });
   };
   return { chunks, restore };
 }
@@ -213,15 +212,12 @@ describe("inspect duplicate-seq detection", () => {
       walLine(runId, 2, WAL_LINE_KIND.Turn, {}), // dup at 2
     ]);
 
-    const result = yield* Effect.either(inspectRun(runId, resultsDir));
+    const error = expectLeft(yield* Effect.either(inspectRun(runId, resultsDir)));
 
-    expect(result._tag).toBe("Left");
-    if (result._tag === "Left") {
-      expect(result.left.cause._tag).toBe("DuplicateSeq");
-      if (result.left.cause._tag === "DuplicateSeq") {
-        // duplicates are sorted ascending; lowest dup is 0.
-        expect(result.left.cause.seq).toBe(0);
-      }
+    expect(error.cause._tag).toBe("DuplicateSeq");
+    if (error.cause._tag === "DuplicateSeq") {
+      // duplicates are sorted ascending; lowest dup is 0.
+      expect(error.cause.seq).toBe(0);
     }
   });
 });
@@ -397,14 +393,11 @@ describe("inspect empty-inflight handling", () => {
     const resultsDir = mkTmpResultsDir("not-found");
     const runId = "run-does-not-exist";
 
-    const result = yield* Effect.either(inspectRun(runId, resultsDir));
+    const error = expectLeft(yield* Effect.either(inspectRun(runId, resultsDir)));
 
-    expect(result._tag).toBe("Left");
-    if (result._tag === "Left") {
-      expect(result.left.cause._tag).toBe("RunNotFound");
-      if (result.left.cause._tag === "RunNotFound") {
-        expect(result.left.cause.runId).toBe(runId);
-      }
+    expect(error.cause._tag).toBe("RunNotFound");
+    if (error.cause._tag === "RunNotFound") {
+      expect(error.cause.runId).toBe(runId);
     }
   });
 });

@@ -5,7 +5,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as YAML from "yaml";
 import { makeReportEmitter, readRunsJsonl } from "../src/emit/report.js";
-import { ScenarioId, RunNumber, TraceId } from "../src/core/types.js";
+import { ScenarioId, RunNumber, RUN_SOURCE } from "../src/core/types.js";
 import type { RunRecord, Report } from "../src/core/schema.js";
 import { PublishError } from "../src/core/errors.js";
 import { itEffect, EITHER_LEFT } from "./support/effect.js";
@@ -14,7 +14,6 @@ import { itEffect, EITHER_LEFT } from "./support/effect.js";
 const SCEN_A_ID = "scen-a";
 const SCEN_B_ID = "scen-b";
 const SCEN_C_ID = "scen-c";
-const SCEN_D_ID = "scen-d";
 const SCEN_C_RUN_NUMBER = 2;
 const EXPECTED_RESULTS_LINE_COUNT = 2;
 const EXPECTED_ROUNDTRIP_LENGTH = 1;
@@ -24,7 +23,6 @@ const ISSUE_TEXT = "broken";
 const ISSUE_SEVERITY_CRITICAL = "critical";
 const REASON_FAIL = "failed";
 const REASON_PASS = "ok";
-const TRACE_ID_1 = "trace-id-1";
 const FAKE_PR_NUMBER = 99999;
 const SPECIAL_SCEN_ID = "scen/special:test";
 const SAFE_SCEN_FILENAME = "scen_special_test.1.yaml";
@@ -55,7 +53,7 @@ const SUMMARY_ISSUES_LABEL = "- issues:";
 
 function makeRecord(id: string, run: number, pass: boolean): RunRecord {
   return {
-    source: "trace",
+    source: RUN_SOURCE.Bundle,
     scenarioId: ScenarioId(id),
     runNumber: RunNumber(run),
     modelName: "test-model",
@@ -591,27 +589,6 @@ describe("readRunsJsonl", () => {
     const dir = tmpDir();
     writeFileSync(path.join(dir, "results.jsonl"), `{"notARunRecord": true}\n`, "utf8");
     expect(readRunsJsonl(dir)).toHaveLength(0);
-  });
-
-  it("preserves traceId field when present in the serialized record", () => {
-    const dir = tmpDir();
-    const r = makeRecord(SCEN_D_ID, 1, true);
-    writeFileSync(
-      path.join(dir, "results.jsonl"),
-      `${JSON.stringify({ ...r, traceId: TRACE_ID_1 })}\n`,
-      "utf8",
-    );
-    const records = readRunsJsonl(dir);
-    expect(records).toHaveLength(1);
-    expect(records[0]?.traceId).toBe(TRACE_ID_1);
-  });
-
-  it("omits traceId field when not present in the serialized record", () => {
-    const dir = tmpDir();
-    writeFileSync(path.join(dir, "results.jsonl"), `${JSON.stringify(makeRecord(SCEN_A_ID, 1, true))}\n`, "utf8");
-    const records = readRunsJsonl(dir);
-    expect(records).toHaveLength(1);
-    expect(records[0]?.traceId).toBeUndefined();
   });
 
   // ── whitespace and blank-line handling ──────────────────────────────────────

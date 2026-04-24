@@ -20,6 +20,8 @@ export type AgentStartErrorCause =
   | { readonly _tag: "WorkspacePathEscape"; readonly wfPath: string }
   | { readonly _tag: "WorkspaceSetupFailed"; readonly message: string };
 
+export const AgentStartErrorCause = Data.taggedEnum<AgentStartErrorCause>();
+
 export class AgentRunTimeoutError extends Data.TaggedError("AgentRunTimeoutError")<{
   readonly scenarioId: ScenarioId;
   readonly turnIndex: number;
@@ -39,6 +41,8 @@ export type TraceDecodeCause =
   | { readonly _tag: "UnknownFormat"; readonly path: string }
   | { readonly _tag: "SchemaInvalid"; readonly path: string; readonly errors: ReadonlyArray<string> };
 
+export const TraceDecodeCause = Data.taggedEnum<TraceDecodeCause>();
+
 export class BundleDecodeError extends Data.TaggedError("BundleDecodeError")<{
   readonly cause: BundleDecodeCause;
 }> {}
@@ -46,6 +50,8 @@ export class BundleDecodeError extends Data.TaggedError("BundleDecodeError")<{
 export type BundleDecodeCause =
   | { readonly _tag: "UnknownFormat"; readonly path: string }
   | { readonly _tag: "SchemaInvalid"; readonly path: string; readonly errors: ReadonlyArray<string> };
+
+export const BundleDecodeCause = Data.taggedEnum<BundleDecodeCause>();
 
 export class BundleBuildError extends Data.TaggedError("BundleBuildError")<{
   readonly cause: BundleBuildCause;
@@ -58,6 +64,8 @@ export type BundleBuildCause =
   | { readonly _tag: "EventOrderViolation"; readonly previousTs: number; readonly nextTs: number }
   | { readonly _tag: "SchemaInvalid"; readonly errors: ReadonlyArray<string> };
 
+export const BundleBuildCause = Data.taggedEnum<BundleBuildCause>();
+
 export class HarnessExecutionError extends Data.TaggedError("HarnessExecutionError")<{
   readonly cause: HarnessExecutionCause;
 }> {}
@@ -66,6 +74,8 @@ export type HarnessExecutionCause =
   | { readonly _tag: "MissingRuntimeHandle"; readonly agentId: string }
   | { readonly _tag: "InvalidPlanMetadata"; readonly message: string }
   | { readonly _tag: "ExecutionFailed"; readonly message: string };
+
+export const HarnessExecutionCause = Data.taggedEnum<HarnessExecutionCause>();
 
 export class RunCoordinationError extends Data.TaggedError("RunCoordinationError")<{
   readonly cause: RunCoordinationCause;
@@ -76,6 +86,8 @@ export type RunCoordinationCause =
   | { readonly _tag: "HarnessFailed"; readonly detail: HarnessExecutionCause }
   | { readonly _tag: "BundleBuildFailed"; readonly detail: BundleBuildCause };
 
+export const RunCoordinationCause = Data.taggedEnum<RunCoordinationCause>();
+
 export class PublishError extends Data.TaggedError("PublishError")<{
   readonly cause: PublishErrorCause;
 }> {}
@@ -85,12 +97,16 @@ export type PublishErrorCause =
   | { readonly _tag: "GhCliFailed"; readonly exitCode: number; readonly stderr: string }
   | { readonly _tag: "BodyTooLarge"; readonly chars: number; readonly limit: number };
 
+export const PublishErrorCause = Data.taggedEnum<PublishErrorCause>();
+
 export class RunnerResolutionError extends Data.TaggedError("RunnerResolutionError")<{
   readonly cause: RunnerResolutionCause;
 }> {}
 
 export type RunnerResolutionCause =
   { readonly _tag: "InvalidRuntime"; readonly value: string };
+
+export const RunnerResolutionCause = Data.taggedEnum<RunnerResolutionCause>();
 
 // Tag constants. Identity-mapped objects over the `_tag` union members;
 // the mapped-type `satisfies` forces value == key at the type level, so a

@@ -3,7 +3,11 @@ import { glob as doGlob } from "glob";
 import { readFile, stat } from "node:fs/promises";
 import * as path from "node:path";
 import * as YAML from "yaml";
-import { decodePlannedHarnessDocument, PlannedHarnessIngressError } from "./schema.js";
+import {
+  decodePlannedHarnessDocument,
+  PlannedHarnessIngressError,
+  PlannedHarnessIngressErrorCause,
+} from "./schema.js";
 import type {
   LoadedHarnessPlanDocument,
   PlanFilePath,
@@ -18,11 +22,10 @@ function isGlobPattern(value: string): boolean {
 
 function parseFailure(pathValue: PlanFilePath, error: unknown): PlannedHarnessIngressError {
   return new PlannedHarnessIngressError({
-    cause: {
-      _tag: "ParseFailure",
+    cause: PlannedHarnessIngressErrorCause.ParseFailure({
       path: pathValue,
       message: error instanceof Error ? error.message : String(error),
-    },
+    }),
   });
 }
 
@@ -80,12 +83,11 @@ function readFileEff(pathValue: PlanFilePath): Effect.Effect<string, PlannedHarn
           error instanceof Error &&
           "code" in error &&
           (error as { readonly code?: string }).code === "ENOENT"
-            ? { _tag: "FileNotFound", path: pathValue }
-            : {
-                _tag: "ParseFailure",
+            ? PlannedHarnessIngressErrorCause.FileNotFound({ path: pathValue })
+            : PlannedHarnessIngressErrorCause.ParseFailure({
                 path: pathValue,
                 message: error instanceof Error ? error.message : String(error),
-              },
+              }),
       }),
   });
 }
@@ -125,11 +127,10 @@ function enforceUniqueScenarioIds(
     if (previousPath !== undefined) {
       return Effect.fail(
         new PlannedHarnessIngressError({
-          cause: {
-            _tag: "DuplicateScenarioId",
+          cause: PlannedHarnessIngressErrorCause.DuplicateScenarioId({
             scenarioId,
             paths: [previousPath, document.sourcePath],
-          },
+          }),
         }),
       );
     }
@@ -151,12 +152,12 @@ export function loadPlannedHarnessPath(
         return isGlobPattern(pathOrGlob)
           ? Effect.fail(
               new PlannedHarnessIngressError({
-                cause: { _tag: "GlobNoMatches", pattern: pathOrGlob },
+                cause: PlannedHarnessIngressErrorCause.GlobNoMatches({ pattern: pathOrGlob }),
               }),
             )
           : Effect.fail(
               new PlannedHarnessIngressError({
-                cause: { _tag: "FileNotFound", path: pathOrGlob },
+                cause: PlannedHarnessIngressErrorCause.FileNotFound({ path: pathOrGlob }),
               }),
             );
       }
