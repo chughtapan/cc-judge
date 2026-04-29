@@ -608,7 +608,8 @@ function scanFileForOutcome(file: string): boolean {
   }
 }
 
-function isOutcomeLine(value: unknown): boolean {
+/** @internal — exported for direct property-based testing. */
+export function isOutcomeLine(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
   const kind = (value as { kind?: unknown }).kind;
   return kind === WAL_LINE_KIND.Outcome;
@@ -618,12 +619,14 @@ function isOutcomeLine(value: unknown): boolean {
 // Error helpers.
 // ---------------------------------------------------------------------------
 
-function errorToString(err: unknown): string {
+/** @internal — exported for direct property-based testing. */
+export function errorToString(err: unknown): string {
   if (err instanceof Error) return err.message;
   try { return String(err); } catch (inner) { void inner; return "<unstringifiable error>"; }
 }
 
-function isEnoent(err: unknown): boolean {
+/** @internal — exported for direct property-based testing. */
+export function isEnoent(err: unknown): boolean {
   return (
     typeof err === "object" &&
     err !== null &&

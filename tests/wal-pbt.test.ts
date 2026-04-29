@@ -5,7 +5,16 @@
 
 import { describe, expect, it } from "vitest";
 import * as fc from "fast-check";
-import { PAYLOAD_PREVIEW_MAX_CHARS, previewPayload } from "../src/emit/wal.js";
+import {
+  PAYLOAD_PREVIEW_MAX_CHARS,
+  WAL_LINE_KIND,
+  errorToString,
+  isEnoent,
+  isOutcomeLine,
+  previewPayload,
+  walPathsFromResultsDir,
+} from "../src/emit/wal.js";
+import * as path from "node:path";
 
 const PROPERTY_RUNS = 200;
 
@@ -112,6 +121,189 @@ describe("previewPayload (PBT)", () => {
           expect(out.endsWith("…")).toBe(false);
         },
       ),
+      { numRuns: PROPERTY_RUNS },
+    );
+  });
+});
+
+// ── isOutcomeLine ───────────────────────────────────────────────────────────
+
+describe("isOutcomeLine (PBT)", () => {
+  it("returns false for non-object inputs", () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.constant(null),
+          fc.constant(undefined),
+          fc.boolean(),
+          fc.integer(),
+          fc.string(),
+        ),
+        (value) => {
+          expect(isOutcomeLine(value)).toBe(false);
+        },
+      ),
+      { numRuns: PROPERTY_RUNS },
+    );
+  });
+
+  it("returns true iff the object's kind field equals WAL_LINE_KIND.Outcome", () => {
+    fc.assert(
+      fc.property(
+        fc.dictionary(fc.string(), fc.anything()),
+        fc.string(),
+        (extras, kindValue) => {
+          const obj = { ...extras, kind: kindValue };
+          if (kindValue === WAL_LINE_KIND.Outcome) {
+            expect(isOutcomeLine(obj)).toBe(true);
+          } else {
+            expect(isOutcomeLine(obj)).toBe(false);
+          }
+        },
+      ),
+      { numRuns: PROPERTY_RUNS },
+    );
+  });
+
+  it("returns false for objects without a kind field", () => {
+    fc.assert(
+      fc.property(
+        fc
+          .dictionary(fc.string(), fc.anything())
+          .filter((o) => !("kind" in o)),
+        (obj) => {
+          expect(isOutcomeLine(obj)).toBe(false);
+        },
+      ),
+      { numRuns: PROPERTY_RUNS },
+    );
+  });
+
+  it("recognises a concrete outcome line shape", () => {
+    expect(
+      isOutcomeLine({ v: 1, runId: "r", seq: 5, ts: 0, kind: WAL_LINE_KIND.Outcome, payload: {} }),
+    ).toBe(true);
+  });
+});
+
+// ── errorToString ───────────────────────────────────────────────────────────
+
+describe("errorToString (PBT)", () => {
+  it("returns Error.message for Error instances", () => {
+    fc.assert(
+      fc.property(fc.string(), (msg) => {
+        expect(errorToString(new Error(msg))).toBe(msg);
+      }),
+      { numRuns: PROPERTY_RUNS },
+    );
+  });
+
+  it("returns String(value) for non-Error inputs", () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.constant(null),
+          fc.constant(undefined),
+          fc.boolean(),
+          fc.integer(),
+          fc.string(),
+        ),
+        (value) => {
+          expect(errorToString(value)).toBe(String(value));
+        },
+      ),
+      { numRuns: PROPERTY_RUNS },
+    );
+  });
+
+  it("returns a non-empty string for any input", () => {
+    fc.assert(
+      fc.property(fc.anything(), (value) => {
+        const out = errorToString(value);
+        expect(typeof out).toBe("string");
+      }),
+      { numRuns: PROPERTY_RUNS },
+    );
+  });
+
+  it("falls back to '<unstringifiable error>' when String() throws", () => {
+    // Object with a throwing toString — String(obj) calls toString which
+    // throws — exercises the catch branch.
+    const hostile = {
+      toString(): string {
+        throw new Error("nope");
+      },
+    };
+    expect(errorToString(hostile)).toBe("<unstringifiable error>");
+  });
+});
+
+// ── isEnoent ────────────────────────────────────────────────────────────────
+
+describe("isEnoent (PBT)", () => {
+  it("returns false for non-object inputs", () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.constant(null),
+          fc.constant(undefined),
+          fc.boolean(),
+          fc.integer(),
+          fc.string(),
+        ),
+        (value) => {
+          expect(isEnoent(value)).toBe(false);
+        },
+      ),
+      { numRuns: PROPERTY_RUNS },
+    );
+  });
+
+  it("returns true iff the object has code === 'ENOENT'", () => {
+    fc.assert(
+      fc.property(
+        fc.dictionary(fc.string(), fc.anything()),
+        fc.string(),
+        (extras, code) => {
+          const obj = { ...extras, code };
+          if (code === "ENOENT") {
+            expect(isEnoent(obj)).toBe(true);
+          } else {
+            expect(isEnoent(obj)).toBe(false);
+          }
+        },
+      ),
+      { numRuns: PROPERTY_RUNS },
+    );
+  });
+
+  it("returns false for an object with code === 'EACCES' (close miss)", () => {
+    expect(isEnoent({ code: "EACCES" })).toBe(false);
+  });
+});
+
+// ── walPathsFromResultsDir ──────────────────────────────────────────────────
+
+describe("walPathsFromResultsDir (PBT)", () => {
+  it("inflightDir is always under resultsDir", () => {
+    fc.assert(
+      fc.property(fc.string({ minLength: 1 }), (resultsDir) => {
+        const paths = walPathsFromResultsDir(resultsDir);
+        expect(paths.resultsDir).toBe(resultsDir);
+        expect(paths.inflightDir).toBe(path.join(resultsDir, "inflight"));
+        expect(paths.runsDir).toBe(path.join(resultsDir, "runs"));
+      }),
+      { numRuns: PROPERTY_RUNS },
+    );
+  });
+
+  it("inflightDir and runsDir are siblings (different basenames)", () => {
+    fc.assert(
+      fc.property(fc.string({ minLength: 1 }), (resultsDir) => {
+        const paths = walPathsFromResultsDir(resultsDir);
+        expect(path.dirname(paths.inflightDir)).toBe(path.dirname(paths.runsDir));
+        expect(path.basename(paths.inflightDir)).not.toBe(path.basename(paths.runsDir));
+      }),
       { numRuns: PROPERTY_RUNS },
     );
   });
