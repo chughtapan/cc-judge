@@ -131,4 +131,61 @@ describe("DockerRuntime", () => {
       expect(after.length).toBe(0);
     },
   );
+
+  itEffect(
+    "removes auto-tagged image when docker build fails partway",
+    function* () {
+      execSyncMock.mockImplementation((command: string) => {
+        if (command.includes("docker build")) {
+          throw new Error("docker build failed (simulated)");
+        }
+        return Buffer.from("");
+      });
+
+      const repoRoot = mkdtempSync(path.join(os.tmpdir(), "cc-judge-build-cleanup-"));
+      const contextPath = path.join(repoRoot, "ctx");
+      mkdirSync(contextPath, { recursive: true });
+      writeFileSync(path.join(contextPath, "Dockerfile"), "FROM alpine:3.19\n", "utf8");
+
+      const runtime = new DockerRuntime();
+      const agent = {
+        id: AgentId("build-cleanup-agent"),
+        name: "Build Cleanup Agent",
+        artifact: {
+          _tag: "DockerBuildArtifact" as const,
+          contextPath,
+        },
+        promptInputs: {},
+      };
+      const plan = {
+        project: ProjectId("cc-judge"),
+        scenarioId: ScenarioId("build-cleanup"),
+        name: "build-cleanup",
+        description: "verify auto-tagged image is removed on build failure",
+        agents: [agent] as const,
+        requirements: {
+          expectedBehavior: "build fails; auto-tagged image is rm'd",
+          validationChecks: ["docker image rm called"],
+        },
+      };
+
+      const result = yield* Effect.either(runtime.prepare(agent, plan));
+      expect(result._tag).toBe("Left");
+
+      const buildCall = execSyncMock.mock.calls.find(([cmd]) =>
+        typeof cmd === "string" && cmd.includes("docker build"),
+      );
+      expect(buildCall).toBeDefined();
+      const builtTag = String(buildCall?.[0] ?? "").match(/-t\s+(\S+)/u)?.[1];
+      expect(builtTag).toBeDefined();
+
+      const cleanupCall = execSyncMock.mock.calls.find(([cmd]) =>
+        typeof cmd === "string" &&
+        cmd.includes("docker image rm -f") &&
+        builtTag !== undefined &&
+        cmd.includes(builtTag),
+      );
+      expect(cleanupCall).toBeDefined();
+    },
+  );
 });

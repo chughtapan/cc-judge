@@ -578,50 +578,64 @@ function buildDockerImage(
       }),
     );
   }
-  return Effect.try({
-    try: () => {
-      const contextPath = path.resolve(artifact.contextPath);
-      if (!existsSync(contextPath)) {
-        throw new AgentStartError({
+  return Effect.suspend(() => {
+    const contextPath = path.resolve(artifact.contextPath);
+    if (!existsSync(contextPath)) {
+      return Effect.fail(
+        new AgentStartError({
           scenarioId: plan.scenarioId,
           agentId: agent.id,
           cause: AgentStartErrorCause.BuildContextMissing({
             path: contextPath,
           }),
-        });
-      }
-      const autoTag = `cc-judge-${sanitizeId(plan.scenarioId)}-${sanitizeId(agent.id)}-${Date.now()}`;
-      const imageTag = artifact.imageTag ?? autoTag;
-      const dockerfilePath = artifact.dockerfilePath !== undefined
-        ? path.resolve(contextPath, artifact.dockerfilePath)
-        : undefined;
-      const args = [
-        "build",
-        "-t",
-        imageTag,
-        ...(dockerfilePath !== undefined ? ["-f", dockerfilePath] : []),
-        ...(artifact.target !== undefined ? ["--target", artifact.target] : []),
-        ...renderBuildArgs(artifact.buildArgs),
-        contextPath,
-      ];
-      execSync(`docker ${args.map(shellQuote).join(" ")}`, { stdio: "pipe" });
-      return {
-        image: imageTag,
-        removeOnStop: artifact.imageTag === undefined,
-      };
-    },
-    catch: (error) => {
-      if (error instanceof AgentStartError) {
-        return error;
-      }
-      return new AgentStartError({
-        scenarioId: plan.scenarioId,
-        agentId: agent.id,
-        cause: AgentStartErrorCause.DockerBuildFailed({
-          message: error instanceof Error ? error.message : String(error),
         }),
-      });
-    },
+      );
+    }
+    const autoTag = `cc-judge-${sanitizeId(plan.scenarioId)}-${sanitizeId(agent.id)}-${Date.now()}`;
+    const imageTag = artifact.imageTag ?? autoTag;
+    const ownsTag = artifact.imageTag === undefined;
+    const dockerfilePath = artifact.dockerfilePath !== undefined
+      ? path.resolve(contextPath, artifact.dockerfilePath)
+      : undefined;
+    const args = [
+      "build",
+      "-t",
+      imageTag,
+      ...(dockerfilePath !== undefined ? ["-f", dockerfilePath] : []),
+      ...(artifact.target !== undefined ? ["--target", artifact.target] : []),
+      ...renderBuildArgs(artifact.buildArgs),
+      contextPath,
+    ];
+    return Effect.try({
+      try: () => {
+        execSync(`docker ${args.map(shellQuote).join(" ")}`, { stdio: "pipe" });
+        return {
+          image: imageTag,
+          removeOnStop: ownsTag,
+        };
+      },
+      catch: (error) => {
+        // Best-effort cleanup of partial image when we own the tag. Docker
+        // build can leave a tagged-but-incomplete image in the daemon if it
+        // fails after `-t` takes effect; without this, autoTag-named artifacts
+        // accumulate forever. User-supplied tags are left alone — their
+        // lifecycle is owned by the user.
+        if (ownsTag) {
+          try {
+            execSync(`docker image rm -f ${shellQuote(imageTag)}`, { stdio: "ignore" });
+          } catch (cleanupErr) {
+            void cleanupErr;
+          }
+        }
+        return new AgentStartError({
+          scenarioId: plan.scenarioId,
+          agentId: agent.id,
+          cause: AgentStartErrorCause.DockerBuildFailed({
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        });
+      },
+    });
   });
 }
 
