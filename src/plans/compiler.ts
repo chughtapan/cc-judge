@@ -147,15 +147,6 @@ function importHarnessModule(
   );
 }
 
-// Describe a non-Effect return value from a user's harness load() so the
-// error message tells the user what they actually returned.
-function describeLoadReturn(value: unknown): string {
-  if (value === null) return "null";
-  if (typeof value !== "object") return typeof value;
-  if (typeof (value as { then?: unknown }).then === "function") return "Promise";
-  return "non-Effect object";
-}
-
 function compileOneDocument(
   document: LoadedHarnessPlanDocument,
   cache: Map<string, ImportedHarnessModule>,
@@ -217,11 +208,19 @@ function invokeHarnessLoad(
       typeof loadResult !== "object" ||
       typeof (loadResult as { pipe?: unknown }).pipe !== "function"
     ) {
+      const got =
+        loadResult !== null &&
+        typeof loadResult === "object" &&
+        typeof (loadResult as { then?: unknown }).then === "function"
+          ? "Promise (did you accidentally mark load() async?)"
+          : loadResult === null
+            ? "null"
+            : typeof loadResult;
       return Effect.fail(
         harnessLoadFailed(
           document.sourcePath,
           document.document.harness.module,
-          `harness load() must return an Effect; got ${describeLoadReturn(loadResult)}`,
+          `harness load() must return an Effect; got ${got}`,
         ),
       );
     }

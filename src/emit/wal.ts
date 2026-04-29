@@ -166,9 +166,16 @@ export function walPathsFromResultsDir(resultsDir: string): WalPaths {
 // Bound the size of payload previews emitted into walWarn so a giant
 // payload can't blow up the structured log line. Operators get enough to
 // identify the lost event without flooding stderr.
-const PAYLOAD_PREVIEW_MAX_CHARS = 200;
+export const PAYLOAD_PREVIEW_MAX_CHARS = 200;
 
-function previewPayload(payload: unknown): string {
+/**
+ * Render a payload as a short JSON preview suitable for embedding inline
+ * in a structured log line. Returns "<unstringifiable>" for values
+ * JSON.stringify cannot represent (functions, symbols, circular refs).
+ * Exported for direct property-based testing.
+ * @internal
+ */
+export function previewPayload(payload: unknown): string {
   try {
     const serialized = JSON.stringify(payload);
     if (serialized === undefined) return "<unstringifiable>";

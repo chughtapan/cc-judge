@@ -354,6 +354,71 @@ describe("planned harness compiler + cli ingress", () => {
     },
   );
 
+  // Three short fixtures that exercise the remaining error-message branches
+  // for non-Effect return values: null, primitive (number), plain object
+  // without a .then. Each kills the corresponding ternary branch in
+  // compiler.ts that produces the "got <X>" suffix.
+
+  itEffect("compiler error names 'null' when load() returns null", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-null-"));
+    const harnessModulePath = path.join(dir, "null-harness.mjs");
+    writeFileSync(
+      harnessModulePath,
+      ["export default {", "  load() { return null; },", "};", ""].join("\n"),
+      "utf8",
+    );
+    const planPath = writePlanFile(dir, "null.yaml", planYaml(harnessModulePath));
+
+    const documents = yield* loadPlannedHarnessPath(planPath);
+    const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT && result.left.cause._tag === "HarnessPlanLoadFailed") {
+      expect(result.left.cause.message).toContain("got null");
+    }
+  });
+
+  itEffect("compiler error names the typeof when load() returns a primitive", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-num-"));
+    const harnessModulePath = path.join(dir, "num-harness.mjs");
+    writeFileSync(
+      harnessModulePath,
+      ["export default {", "  load() { return 42; },", "};", ""].join("\n"),
+      "utf8",
+    );
+    const planPath = writePlanFile(dir, "num.yaml", planYaml(harnessModulePath));
+
+    const documents = yield* loadPlannedHarnessPath(planPath);
+    const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT && result.left.cause._tag === "HarnessPlanLoadFailed") {
+      expect(result.left.cause.message).toContain("got number");
+    }
+  });
+
+  itEffect(
+    "compiler error names 'object' when load() returns a plain object without then",
+    function* () {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-obj-"));
+      const harnessModulePath = path.join(dir, "obj-harness.mjs");
+      writeFileSync(
+        harnessModulePath,
+        ["export default {", "  load() { return { foo: 1 }; },", "};", ""].join("\n"),
+        "utf8",
+      );
+      const planPath = writePlanFile(dir, "obj.yaml", planYaml(harnessModulePath));
+
+      const documents = yield* loadPlannedHarnessPath(planPath);
+      const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+      expect(result._tag).toBe(EITHER_LEFT);
+      if (result._tag === EITHER_LEFT && result.left.cause._tag === "HarnessPlanLoadFailed") {
+        expect(result.left.cause.message).toContain("got object");
+      }
+    },
+  );
+
   itEffect(
     "compiler maps an uncaught defect inside the load() Effect to a typed error",
     function* () {
