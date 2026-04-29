@@ -1,243 +1,19 @@
-import { afterEach, describe, expect, vi } from "vitest";
+// Real-process tests for SubprocessRuntime. The DockerRuntime tests that
+// previously lived here were mocked-execSync string-assembly tests — they
+// asserted that we passed the right shell text to a fake docker binary,
+// which doesn't tell us anything about whether real Docker accepts the
+// command. They were deleted alongside a follow-up plan to (1) replace
+// runtime.ts's manual `execSync("docker ...")` driving with dockerode and
+// (2) cover Docker behavior with a real-Docker integration suite under
+// tests/integration/. Until that ships, runtime.ts's Docker paths are
+// covered only by the type system.
+
+import { describe, expect } from "vitest";
 import { Effect } from "effect";
-
-const { childProcessActual } = vi.hoisted(() => {
-  const { createRequire } = require("node:module") as typeof import("node:module");
-  const req = createRequire(import.meta.url);
-  return {
-    childProcessActual: req("node:child_process") as typeof import("node:child_process"),
-  };
-});
-
-vi.mock("node:child_process", () => ({
-  ...childProcessActual,
-  execSync: vi.fn(),
-  spawn: vi.fn(),
-}));
-
-const { DockerRuntime, SubprocessRuntime } = await import("../src/runner/index.js");
-const { AgentId, ProjectId, ScenarioId } = await import("../src/core/types.js");
-import * as childProcess from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { itEffect, expectLeft, EITHER_LEFT } from "./support/effect.js";
-
-const execSyncMock = vi.mocked(childProcess.execSync);
-
-afterEach(() => {
-  vi.resetAllMocks();
-});
-
-describe("DockerRuntime", () => {
-  itEffect("resolves dockerfilePath relative to contextPath before docker build", function* () {
-    execSyncMock.mockImplementation((command: string) => {
-      if (command.includes("docker create")) {
-        return Buffer.from("runtime-cid\n");
-      }
-      return Buffer.from("");
-    });
-
-    const repoRoot = mkdtempSync(path.join(os.tmpdir(), "cc-judge-runtime-"));
-    const contextPath = path.join(repoRoot, "agents", "alpha");
-    const relativeDockerfilePath = path.join("docker", "Dockerfile");
-    const absoluteDockerfilePath = path.resolve(contextPath, relativeDockerfilePath);
-
-    mkdirSync(path.join(contextPath, "docker"), { recursive: true });
-    writeFileSync(absoluteDockerfilePath, "FROM alpine:3.19\n", "utf8");
-
-    const runtime = new DockerRuntime();
-    const agent = {
-      id: AgentId("docker-agent"),
-      name: "Docker Agent",
-      artifact: {
-        _tag: "DockerBuildArtifact" as const,
-        contextPath,
-        dockerfilePath: relativeDockerfilePath,
-      },
-      promptInputs: {},
-    };
-    const plan = {
-      project: ProjectId("cc-judge"),
-      scenarioId: ScenarioId("dockerfile-relative"),
-      name: "dockerfile-relative",
-      description: "relative dockerfile path",
-      agents: [agent] as const,
-      requirements: {
-        expectedBehavior: "build from the relative dockerfile",
-        validationChecks: ["docker build uses an absolute Dockerfile path"],
-      },
-    };
-
-    const handle = yield* runtime.prepare(agent, plan);
-    yield* runtime.stop(handle);
-
-    const buildCommand = String(execSyncMock.mock.calls[0]?.[0] ?? "");
-    expect(buildCommand).toContain(`-f ${absoluteDockerfilePath}`);
-    expect(buildCommand).not.toMatch(/(^|\s)-f docker\/Dockerfile(\s|$)/u);
-  });
-
-  itEffect(
-    "cleans up workspace tmpdir when container creation fails after workspace setup",
-    function* () {
-      execSyncMock.mockImplementation((command: string) => {
-        if (command.includes("docker image inspect")) {
-          return Buffer.from("[{}]\n");
-        }
-        if (command.includes("docker create")) {
-          throw new Error("docker create failed (simulated)");
-        }
-        return Buffer.from("");
-      });
-
-      const scenarioPrefix = `cc-judge-cleanup-leak-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const runtime = new DockerRuntime();
-      const agent = {
-        id: AgentId("leak-agent"),
-        name: "Leak Agent",
-        artifact: {
-          _tag: "DockerImageArtifact" as const,
-          image: "alpine:3.19",
-          pullPolicy: "if-missing" as const,
-        },
-        promptInputs: {},
-      };
-      const plan = {
-        project: ProjectId("cc-judge"),
-        scenarioId: ScenarioId(scenarioPrefix),
-        name: "workspace-cleanup-leak",
-        description: "verify workspace cleanup on container failure",
-        agents: [agent] as const,
-        requirements: {
-          expectedBehavior: "container creation fails; workspace must be cleaned up",
-          validationChecks: ["no tmpdir leak"],
-        },
-      };
-
-      const before = readdirSync(os.tmpdir()).filter((name) =>
-        name.startsWith(`cc-judge-${scenarioPrefix}-`),
-      );
-      expect(before.length).toBe(0);
-
-      const result = yield* Effect.either(runtime.prepare(agent, plan));
-      expect(result._tag).toBe(EITHER_LEFT);
-
-      const after = readdirSync(os.tmpdir()).filter((name) =>
-        name.startsWith(`cc-judge-${scenarioPrefix}-`),
-      );
-      for (const leaked of after) {
-        expect(existsSync(path.join(os.tmpdir(), leaked))).toBe(false);
-      }
-      expect(after.length).toBe(0);
-    },
-  );
-
-  itEffect(
-    "removes auto-tagged image when docker build fails partway",
-    function* () {
-      execSyncMock.mockImplementation((command: string) => {
-        if (command.includes("docker build")) {
-          throw new Error("docker build failed (simulated)");
-        }
-        return Buffer.from("");
-      });
-
-      const repoRoot = mkdtempSync(path.join(os.tmpdir(), "cc-judge-build-cleanup-"));
-      const contextPath = path.join(repoRoot, "ctx");
-      mkdirSync(contextPath, { recursive: true });
-      writeFileSync(path.join(contextPath, "Dockerfile"), "FROM alpine:3.19\n", "utf8");
-
-      const runtime = new DockerRuntime();
-      const agent = {
-        id: AgentId("build-cleanup-agent"),
-        name: "Build Cleanup Agent",
-        artifact: {
-          _tag: "DockerBuildArtifact" as const,
-          contextPath,
-        },
-        promptInputs: {},
-      };
-      const plan = {
-        project: ProjectId("cc-judge"),
-        scenarioId: ScenarioId("build-cleanup"),
-        name: "build-cleanup",
-        description: "verify auto-tagged image is removed on build failure",
-        agents: [agent] as const,
-        requirements: {
-          expectedBehavior: "build fails; auto-tagged image is rm'd",
-          validationChecks: ["docker image rm called"],
-        },
-      };
-
-      const result = yield* Effect.either(runtime.prepare(agent, plan));
-      expect(result._tag).toBe(EITHER_LEFT);
-
-      const buildCall = execSyncMock.mock.calls.find(([cmd]) =>
-        typeof cmd === "string" && cmd.includes("docker build"),
-      );
-      expect(buildCall).toBeDefined();
-      const builtTag = String(buildCall?.[0] ?? "").match(/-t\s+(\S+)/u)?.[1];
-      expect(builtTag).toBeDefined();
-
-      const cleanupCall = execSyncMock.mock.calls.find(([cmd]) =>
-        typeof cmd === "string" &&
-        cmd.includes("docker image rm -f") &&
-        builtTag !== undefined &&
-        cmd.includes(builtTag),
-      );
-      expect(cleanupCall).toBeDefined();
-    },
-  );
-
-  itEffect(
-    "does NOT remove user-supplied imageTag when docker build fails (user owns the lifecycle)",
-    function* () {
-      execSyncMock.mockImplementation((command: string) => {
-        if (command.includes("docker build")) {
-          throw new Error("docker build failed (simulated)");
-        }
-        return Buffer.from("");
-      });
-
-      const repoRoot = mkdtempSync(path.join(os.tmpdir(), "cc-judge-build-userTag-"));
-      const contextPath = path.join(repoRoot, "ctx");
-      mkdirSync(contextPath, { recursive: true });
-      writeFileSync(path.join(contextPath, "Dockerfile"), "FROM alpine:3.19\n", "utf8");
-
-      const runtime = new DockerRuntime();
-      const userImageTag = "user/owned:v1";
-      const agent = {
-        id: AgentId("user-tag-agent"),
-        name: "User Tag Agent",
-        artifact: {
-          _tag: "DockerBuildArtifact" as const,
-          contextPath,
-          imageTag: userImageTag,
-        },
-        promptInputs: {},
-      };
-      const plan = {
-        project: ProjectId("cc-judge"),
-        scenarioId: ScenarioId("user-tag"),
-        name: "user-tag",
-        description: "user-supplied imageTag is left alone on build failure",
-        agents: [agent] as const,
-        requirements: {
-          expectedBehavior: "build fails; user image tag is NOT rm'd",
-          validationChecks: ["docker image rm not called"],
-        },
-      };
-
-      const result = yield* Effect.either(runtime.prepare(agent, plan));
-      expect(result._tag).toBe(EITHER_LEFT);
-
-      const cleanupCall = execSyncMock.mock.calls.find(([cmd]) =>
-        typeof cmd === "string" && cmd.includes("docker image rm -f"),
-      );
-      expect(cleanupCall).toBeUndefined();
-    },
-  );
-});
+import { existsSync } from "node:fs";
+import { SubprocessRuntime } from "../src/runner/index.js";
+import { AgentId, ProjectId, ScenarioId } from "../src/core/types.js";
+import { itEffect, expectLeft } from "./support/effect.js";
 
 describe("SubprocessRuntime", () => {
   itEffect(
@@ -274,7 +50,7 @@ describe("SubprocessRuntime", () => {
   itEffect(
     "creates and reaps the workspace tmpdir on a successful prepare/stop cycle",
     function* () {
-      // Use /bin/echo as the bin — guaranteed to exist on POSIX CI.
+      // /bin/echo is guaranteed to exist on POSIX CI.
       const runtime = new SubprocessRuntime({ bin: "/bin/echo" });
       const scenarioPrefix = `subproc-success-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const agent = {
@@ -299,9 +75,7 @@ describe("SubprocessRuntime", () => {
       };
 
       const handle = yield* runtime.prepare(agent, plan);
-      // Workspace dir was created.
       expect(existsSync(handle.workspaceDir)).toBe(true);
-      // After stop(), workspace is gone.
       yield* runtime.stop(handle);
       expect(existsSync(handle.workspaceDir)).toBe(false);
     },
