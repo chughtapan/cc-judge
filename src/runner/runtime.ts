@@ -918,7 +918,15 @@ function sanitizeId(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]/gu, "-");
 }
 
-function shellQuote(value: string): string {
+/**
+ * POSIX shell quoting for arguments interpolated into a `docker ...`
+ * command string built up here. Safe inputs (alphanumerics + a small
+ * symbol set) pass through unchanged; everything else is wrapped in
+ * single quotes with embedded single-quote characters escaped via the
+ * canonical `'\''` close-escape-reopen pattern. Exported for direct PBT.
+ * @internal
+ */
+export function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_:@./=-]+$/u.test(value)) {
     return value;
   }

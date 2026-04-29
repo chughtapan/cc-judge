@@ -15,13 +15,13 @@ vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
 }));
 
-const { DockerRuntime } = await import("../src/runner/index.js");
+const { DockerRuntime, SubprocessRuntime } = await import("../src/runner/index.js");
 const { AgentId, ProjectId, ScenarioId } = await import("../src/core/types.js");
 import * as childProcess from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { itEffect } from "./support/effect.js";
+import { itEffect, expectLeft, EITHER_LEFT } from "./support/effect.js";
 
 const execSyncMock = vi.mocked(childProcess.execSync);
 
@@ -120,7 +120,7 @@ describe("DockerRuntime", () => {
       expect(before.length).toBe(0);
 
       const result = yield* Effect.either(runtime.prepare(agent, plan));
-      expect(result._tag).toBe("Left");
+      expect(result._tag).toBe(EITHER_LEFT);
 
       const after = readdirSync(os.tmpdir()).filter((name) =>
         name.startsWith(`cc-judge-${scenarioPrefix}-`),
@@ -170,7 +170,7 @@ describe("DockerRuntime", () => {
       };
 
       const result = yield* Effect.either(runtime.prepare(agent, plan));
-      expect(result._tag).toBe("Left");
+      expect(result._tag).toBe(EITHER_LEFT);
 
       const buildCall = execSyncMock.mock.calls.find(([cmd]) =>
         typeof cmd === "string" && cmd.includes("docker build"),
@@ -186,6 +186,124 @@ describe("DockerRuntime", () => {
         cmd.includes(builtTag),
       );
       expect(cleanupCall).toBeDefined();
+    },
+  );
+
+  itEffect(
+    "does NOT remove user-supplied imageTag when docker build fails (user owns the lifecycle)",
+    function* () {
+      execSyncMock.mockImplementation((command: string) => {
+        if (command.includes("docker build")) {
+          throw new Error("docker build failed (simulated)");
+        }
+        return Buffer.from("");
+      });
+
+      const repoRoot = mkdtempSync(path.join(os.tmpdir(), "cc-judge-build-userTag-"));
+      const contextPath = path.join(repoRoot, "ctx");
+      mkdirSync(contextPath, { recursive: true });
+      writeFileSync(path.join(contextPath, "Dockerfile"), "FROM alpine:3.19\n", "utf8");
+
+      const runtime = new DockerRuntime();
+      const userImageTag = "user/owned:v1";
+      const agent = {
+        id: AgentId("user-tag-agent"),
+        name: "User Tag Agent",
+        artifact: {
+          _tag: "DockerBuildArtifact" as const,
+          contextPath,
+          imageTag: userImageTag,
+        },
+        promptInputs: {},
+      };
+      const plan = {
+        project: ProjectId("cc-judge"),
+        scenarioId: ScenarioId("user-tag"),
+        name: "user-tag",
+        description: "user-supplied imageTag is left alone on build failure",
+        agents: [agent] as const,
+        requirements: {
+          expectedBehavior: "build fails; user image tag is NOT rm'd",
+          validationChecks: ["docker image rm not called"],
+        },
+      };
+
+      const result = yield* Effect.either(runtime.prepare(agent, plan));
+      expect(result._tag).toBe(EITHER_LEFT);
+
+      const cleanupCall = execSyncMock.mock.calls.find(([cmd]) =>
+        typeof cmd === "string" && cmd.includes("docker image rm -f"),
+      );
+      expect(cleanupCall).toBeUndefined();
+    },
+  );
+});
+
+describe("SubprocessRuntime", () => {
+  itEffect(
+    "rejects with BinaryNotFound when bin path does not exist",
+    function* () {
+      const runtime = new SubprocessRuntime({ bin: "/path/that/definitely/does/not/exist/cc-judge-test" });
+      const agent = {
+        id: AgentId("subproc-missing-bin"),
+        name: "Subproc Missing Bin",
+        artifact: {
+          _tag: "DockerImageArtifact" as const,
+          image: "n/a",
+        },
+        promptInputs: {},
+      };
+      const plan = {
+        project: ProjectId("cc-judge"),
+        scenarioId: ScenarioId("subproc-missing-bin"),
+        name: "subproc-missing-bin",
+        description: "verify BinaryNotFound when bin path missing",
+        agents: [agent] as const,
+        requirements: {
+          expectedBehavior: "fails with BinaryNotFound",
+          validationChecks: ["BinaryNotFound cause"],
+        },
+      };
+
+      const result = yield* Effect.either(runtime.prepare(agent, plan));
+      const error = expectLeft(result);
+      expect(error.cause._tag).toBe("BinaryNotFound");
+    },
+  );
+
+  itEffect(
+    "creates and reaps the workspace tmpdir on a successful prepare/stop cycle",
+    function* () {
+      // Use /bin/echo as the bin — guaranteed to exist on POSIX CI.
+      const runtime = new SubprocessRuntime({ bin: "/bin/echo" });
+      const scenarioPrefix = `subproc-success-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const agent = {
+        id: AgentId("subproc-success"),
+        name: "Subproc Success",
+        artifact: {
+          _tag: "DockerImageArtifact" as const,
+          image: "n/a",
+        },
+        promptInputs: {},
+      };
+      const plan = {
+        project: ProjectId("cc-judge"),
+        scenarioId: ScenarioId(scenarioPrefix),
+        name: "subproc-success",
+        description: "happy path: workspace created and removed",
+        agents: [agent] as const,
+        requirements: {
+          expectedBehavior: "workspace lifecycle clean",
+          validationChecks: ["created then removed"],
+        },
+      };
+
+      const handle = yield* runtime.prepare(agent, plan);
+      // Workspace dir was created.
+      expect(existsSync(handle.workspaceDir)).toBe(true);
+      // After stop(), workspace is gone.
+      yield* runtime.stop(handle);
+      expect(existsSync(handle.workspaceDir)).toBe(false);
     },
   );
 });
