@@ -42,7 +42,7 @@ describe("judge preflight cache", () => {
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
-  it("caches successful anthropic auth in memory within the same process", () => {
+  it("reuses the disk cache for back-to-back anthropic preflight calls", () => {
     spawnSyncMock.mockReturnValue({
       status: 0,
       stdout: JSON.stringify({ loggedIn: true }),
@@ -55,7 +55,7 @@ describe("judge preflight cache", () => {
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });
 
-  it("reuses a fresh on-disk success cache after memory reset", () => {
+  it("re-runs preflight after the disk cache is cleared", () => {
     spawnSyncMock.mockReturnValue({
       status: 0,
       stdout: JSON.stringify({ loggedIn: true }),
@@ -66,11 +66,11 @@ describe("judge preflight cache", () => {
     expect(ensureJudgeReady("anthropic")).toBeNull();
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
 
-    resetJudgePreflightCacheForTests();
-    spawnSyncMock.mockReset();
-
+    // No in-memory cache survives a disk cache clear: the next call
+    // must hit `claude auth status` again.
+    clearJudgePreflightDiskCacheForTests();
     expect(ensureJudgeReady("anthropic")).toBeNull();
-    expect(spawnSyncMock).not.toHaveBeenCalled();
+    expect(spawnSyncMock).toHaveBeenCalledTimes(2);
   });
 
   it("does not cache a failing auth preflight", () => {
