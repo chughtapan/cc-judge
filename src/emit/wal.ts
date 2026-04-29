@@ -163,6 +163,24 @@ export function walPathsFromResultsDir(resultsDir: string): WalPaths {
 // instead of the eval's primary output going missing.
 // ---------------------------------------------------------------------------
 
+// Bound the size of payload previews emitted into walWarn so a giant
+// payload can't blow up the structured log line. Operators get enough to
+// identify the lost event without flooding stderr.
+const PAYLOAD_PREVIEW_MAX_CHARS = 200;
+
+function previewPayload(payload: unknown): string {
+  try {
+    const serialized = JSON.stringify(payload);
+    if (serialized === undefined) return "<unstringifiable>";
+    return serialized.length > PAYLOAD_PREVIEW_MAX_CHARS
+      ? `${serialized.slice(0, PAYLOAD_PREVIEW_MAX_CHARS)}…`
+      : serialized;
+  } catch (err) {
+    void err;
+    return "<unstringifiable>";
+  }
+}
+
 function walWarn(event: string, detail: Readonly<Record<string, unknown>>): void {
   // Single-line JSON for log-aggregator compatibility. `process.stderr`
   // not `console.warn` so test harnesses that capture `console.*` don't
@@ -307,11 +325,18 @@ function makeHandle(
   function appendOneLocked(input: WalLineInput): Effect.Effect<void, never, never> {
     return Effect.sync(() => {
       if (state.closed) {
-        // Invariant: post-close appends are dropped with a warning.
-        // A caller that races its own close against an emit is
-        // observable through the log — invariant #12 means we still
-        // return void.
-        walWarn("append.after-close", { runId, kind: input.kind });
+        // Invariant #12 keeps this Effect non-failing, so post-close appends
+        // are dropped on the floor. To make the loss correlatable, walWarn
+        // includes runId, kind, and a short payload preview — operators
+        // monitoring the WAL_WARN_SOURCE channel can identify exactly which
+        // event went missing. A caller that races its own close against an
+        // emit will see the warning in stderr; the verdict is unaffected.
+        walWarn("append.after-close", {
+          runId,
+          kind: input.kind,
+          attemptedAt: Date.now(),
+          payloadPreview: previewPayload(input.payload),
+        });
         return;
       }
       const line: WalLine = {

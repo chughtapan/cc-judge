@@ -159,6 +159,55 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
     expect(lines.length).toBe(2);
   });
 
+  itEffect(
+    "post-close append warning includes runId, kind, and payload preview",
+    function* () {
+      const resultsDir = mkTmpResultsDir("post-close-warn");
+      const paths = walPathsFromResultsDir(resultsDir);
+
+      const stderrLines: string[] = [];
+      const writeSpy = vi
+        .spyOn(process.stderr, "write")
+        .mockImplementation((chunk: unknown) => {
+          stderrLines.push(typeof chunk === "string" ? chunk : String(chunk));
+          return true;
+        });
+
+      try {
+        yield* Effect.scoped(Effect.gen(function* () {
+          const handle = yield* openRunLog(RunId("run-post-close-warn"), paths);
+          yield* handle.close({ status: RUN_CLOSE_STATUS.Completed });
+          yield* handle.append({
+            kind: WAL_LINE_KIND.Event,
+            payload: { critical: "this-event-was-dropped", value: 42 },
+          });
+        }));
+      } finally {
+        writeSpy.mockRestore();
+      }
+
+      const afterCloseWarnings = stderrLines
+        .map((line) => {
+          try {
+            return JSON.parse(line.trim()) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
+        })
+        .filter(
+          (parsed): parsed is Record<string, unknown> =>
+            parsed !== null && parsed["event"] === "append.after-close",
+        );
+
+      expect(afterCloseWarnings.length).toBe(1);
+      const warning = afterCloseWarnings[0];
+      expect(warning?.["runId"]).toBe("run-post-close-warn");
+      expect(warning?.["kind"]).toBe(WAL_LINE_KIND.Event);
+      expect(typeof warning?.["payloadPreview"]).toBe("string");
+      expect(String(warning?.["payloadPreview"])).toContain("this-event-was-dropped");
+    },
+  );
+
   itEffect("fs failures on the hot path are swallowed; run continues", function* () {
     // Pre-stage a DIRECTORY at the path where the WAL file should live.
     // `fs.appendFileSync` will throw EISDIR when it tries to open the
