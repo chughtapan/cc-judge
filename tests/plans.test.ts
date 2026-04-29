@@ -301,4 +301,107 @@ describe("planned harness compiler + cli ingress", () => {
     expect(code).toBe(EXIT_FATAL);
     expect(chunks.join("")).toContain("ParseFailure");
   });
+
+  // P0-7 regression tests: a misbehaving user harness must NOT crash the
+  // cc-judge process. All three failure modes must produce a typed
+  // PlannedHarnessIngressError (HarnessPlanLoadFailed cause).
+
+  itEffect("compiler maps a synchronous throw from load() to a typed error", function* () {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-throw-"));
+    const harnessModulePath = path.join(dir, "throw-harness.mjs");
+    writeFileSync(
+      harnessModulePath,
+      [
+        "export default {",
+        "  load() {",
+        "    throw new Error('intentional sync throw from load()');",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const planPath = writePlanFile(dir, "throw.yaml", planYaml(harnessModulePath));
+
+    const documents = yield* loadPlannedHarnessPath(planPath);
+    const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT) {
+      expect(result.left.cause._tag).toBe("HarnessPlanLoadFailed");
+      if (result.left.cause._tag === "HarnessPlanLoadFailed") {
+        expect(result.left.cause.message).toContain("threw synchronously");
+        expect(result.left.cause.message).toContain("intentional sync throw");
+      }
+    }
+  });
+
+  itEffect(
+    "compiler maps a non-Effect return value from load() to a typed error",
+    function* () {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-nonEffect-"));
+      const harnessModulePath = path.join(dir, "promise-harness.mjs");
+      writeFileSync(
+        harnessModulePath,
+        [
+          "export default {",
+          "  async load() {",
+          "    return { plan: {}, harness: { name: 'x', run: () => undefined } };",
+          "  },",
+          "};",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const planPath = writePlanFile(dir, "promise.yaml", planYaml(harnessModulePath));
+
+      const documents = yield* loadPlannedHarnessPath(planPath);
+      const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+      expect(result._tag).toBe(EITHER_LEFT);
+      if (result._tag === EITHER_LEFT) {
+        expect(result.left.cause._tag).toBe("HarnessPlanLoadFailed");
+        if (result.left.cause._tag === "HarnessPlanLoadFailed") {
+          expect(result.left.cause.message).toContain("must return an Effect");
+          expect(result.left.cause.message).toContain("Promise");
+        }
+      }
+    },
+  );
+
+  itEffect(
+    "compiler maps an uncaught defect inside the load() Effect to a typed error",
+    function* () {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-defect-"));
+      const harnessModulePath = path.join(dir, "defect-harness.mjs");
+      writeFileSync(
+        harnessModulePath,
+        [
+          "import { Effect } from 'effect';",
+          "export default {",
+          "  load() {",
+          "    return Effect.sync(() => {",
+          "      throw new Error('intentional defect inside load() effect');",
+          "    });",
+          "  },",
+          "};",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const planPath = writePlanFile(dir, "defect.yaml", planYaml(harnessModulePath));
+
+      const documents = yield* loadPlannedHarnessPath(planPath);
+      const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+      expect(result._tag).toBe(EITHER_LEFT);
+      if (result._tag === EITHER_LEFT) {
+        expect(result.left.cause._tag).toBe("HarnessPlanLoadFailed");
+        if (result.left.cause._tag === "HarnessPlanLoadFailed") {
+          expect(result.left.cause.message).toContain("uncaught defect");
+          expect(result.left.cause.message).toContain("intentional defect");
+        }
+      }
+    },
+  );
 });
