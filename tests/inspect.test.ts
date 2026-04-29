@@ -15,31 +15,7 @@ import * as path from "node:path";
 import { WAL_LINE_KIND, WAL_LINE_VERSION } from "../src/emit/wal.js";
 import { inspectRun, InspectError } from "../src/app/inspect.js";
 import { expectLeft, itEffect } from "./support/effect.js";
-
-// ---------------------------------------------------------------------------
-// I/O capture helpers (mirrors cli.test.ts installStderrCapture pattern).
-// ---------------------------------------------------------------------------
-
-type WriteFn = typeof process.stdout.write;
-
-interface CaptureHandle {
-  readonly chunks: string[];
-  readonly restore: () => void;
-}
-
-function captureStream(stream: NodeJS.WriteStream): CaptureHandle {
-  const chunks: string[] = [];
-  const original = stream.write.bind(stream);
-  const spy: WriteFn = ((s: string | Uint8Array): boolean => {
-    chunks.push(typeof s === "string" ? s : Buffer.from(s).toString("utf8"));
-    return true;
-  }) as WriteFn;
-  Object.defineProperty(stream, "write", { configurable: true, value: spy });
-  const restore = (): void => {
-    Object.defineProperty(stream, "write", { configurable: true, value: original });
-  };
-  return { chunks, restore };
-}
+import { captureStream, type CaptureHandle } from "./support/streams.js";
 
 // ---------------------------------------------------------------------------
 // WAL line fixture helpers.

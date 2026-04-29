@@ -28,6 +28,7 @@ import {
 } from "../src/emit/wal.js";
 import { RunId } from "../src/core/types.js";
 import { itEffect } from "./support/effect.js";
+import { captureStream } from "./support/streams.js";
 
 // ── Test fixture helpers ────────────────────────────────────────────────────
 
@@ -165,14 +166,7 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
       const resultsDir = mkTmpResultsDir("post-close-warn");
       const paths = walPathsFromResultsDir(resultsDir);
 
-      const stderrLines: string[] = [];
-      const writeSpy = vi
-        .spyOn(process.stderr, "write")
-        .mockImplementation((chunk: unknown) => {
-          stderrLines.push(typeof chunk === "string" ? chunk : String(chunk));
-          return true;
-        });
-
+      const stderr = captureStream(process.stderr);
       try {
         yield* Effect.scoped(Effect.gen(function* () {
           const handle = yield* openRunLog(RunId("run-post-close-warn"), paths);
@@ -183,7 +177,7 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
           });
         }));
       } finally {
-        writeSpy.mockRestore();
+        stderr.restore();
       }
 
       type WalWarnLine = {
@@ -193,14 +187,12 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
         readonly payloadPreview?: unknown;
       };
 
-      const afterCloseWarnings = stderrLines
+      const afterCloseWarnings = stderr.chunks
         .map((line): WalWarnLine | null => {
           let parsed: unknown;
           try {
             parsed = JSON.parse(line.trim());
           } catch (parseErr) {
-            // Non-JSON stderr noise (e.g., harness banners) is ignored;
-            // we only care about the structured WAL warnings here.
             void parseErr;
             return null;
           }

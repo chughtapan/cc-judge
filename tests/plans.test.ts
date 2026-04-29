@@ -14,6 +14,7 @@ import {
 } from "../src/plans/index.js";
 import { itEffect, EITHER_LEFT } from "./support/effect.js";
 import { installDefaultEnvVar } from "./support/env.js";
+import { captureStream } from "./support/streams.js";
 
 installDefaultEnvVar("ANTHROPIC_API_KEY", "test-anthropic-api-key");
 
@@ -104,22 +105,6 @@ function writePlanFile(dir: string, name: string, yaml: string): string {
   const filePath = path.join(dir, name);
   writeFileSync(filePath, yaml, "utf8");
   return filePath;
-}
-
-function installStderrCapture(): { readonly chunks: string[]; readonly restore: () => void } {
-  const chunks: string[] = [];
-  const originalWrite = process.stderr.write.bind(process.stderr);
-  const spy = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
-    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
-    return originalWrite(chunk as never, ...(rest as []));
-  }) as typeof process.stderr.write;
-  Object.defineProperty(process.stderr, "write", { configurable: true, value: spy });
-  return {
-    chunks,
-    restore: () => {
-      Object.defineProperty(process.stderr, "write", { configurable: true, value: originalWrite });
-    },
-  };
 }
 
 afterEach(() => {
@@ -291,15 +276,15 @@ describe("planned harness compiler + cli ingress", () => {
   itEffect("returns exit 2 with a parse error from the harness plan loader", function* () {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-invalid-"));
     const badPath = writePlanFile(dir, "broken.yaml", "harness:\n  module: [\n");
-    const { chunks, restore } = installStderrCapture();
+    const stderr = captureStream(process.stderr);
 
     const code = yield* Effect.ensuring(
       main(["run", badPath, "--log-level", "error"]),
-      Effect.sync(restore),
+      Effect.sync(stderr.restore),
     );
 
     expect(code).toBe(EXIT_FATAL);
-    expect(chunks.join("")).toContain("ParseFailure");
+    expect(stderr.chunks.join("")).toContain("ParseFailure");
   });
 
   // P0-7 regression tests: a misbehaving user harness must NOT crash the
