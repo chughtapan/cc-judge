@@ -201,9 +201,9 @@ export class SubprocessRuntime implements AgentRuntime {
           }),
         );
       }
-      // Mirror DockerRuntime.prepare: bind workspace cleanup to any non-success
-      // exit. createSubprocessHandle is sync today so this guards against
-      // future failure paths and fiber interruption between yield points.
+      // createSubprocessHandle is sync today; the acquireUseRelease shape
+      // guards against future failure paths and fiber interruption between
+      // yield points so the workspace cannot leak.
       return Effect.acquireUseRelease(
         makeEmptyWorkspace(plan.scenarioId),
         ({ dir, state }) =>

@@ -322,12 +322,8 @@ function makeHandle(
   // once here so every subsequent call reuses the same permit pool.
   const semaphore = Effect.runSync(Effect.makeSemaphore(1));
 
-  // appendFileSync below does NOT fsync per line — that is by design (per-
-  // event fsync would tank throughput). The trade-off is documented in
-  // docs/WAL.md "Partial-line loss window": a process kill between the
-  // user-space append returning and the kernel flushing the page cache
-  // can lose a single line. Run-level loss is handled by the recovery
-  // sweep; mid-run loss is observable via seq gaps in `cc-judge inspect`.
+  // No per-line fsync — see docs/WAL.md "Partial-line loss window" for
+  // the durability trade-off and how recovery covers run-level loss.
   function appendOneLocked(input: WalLineInput): Effect.Effect<void, never, never> {
     return Effect.sync(() => {
       if (state.closed) {
