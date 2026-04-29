@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Effect, Exit } from "effect";
 import { execSync, spawn, type ChildProcess } from "node:child_process";
 import {
   existsSync,
@@ -111,17 +111,37 @@ export class DockerRuntime implements AgentRuntime {
     const runtimeOpts = this.#opts;
     return Effect.gen(function* () {
       const preparedImage = yield* materializeImage(agent, plan);
-      const workspace = yield* makeEmptyWorkspace(plan.scenarioId);
-      const containerId = yield* createDockerContainer(preparedImage.image, workspace.dir, runtimeOpts, plan, agent);
-      return createDockerHandle({
-        agent,
-        plan,
-        workspaceDir: workspace.dir,
-        state: workspace.state,
-        containerId,
-        claudeArgs: runtimeOpts.claudeArgs ?? DEFAULT_CLAUDE_ARGS,
-        preparedImage,
-      });
+      // Workspace is acquired before container creation; release deletes it
+      // on any non-success exit (failure or interrupt) so partial-prepare
+      // failures cannot leak tmpdirs. On success, the returned handle owns
+      // the workspace and stop() handles cleanup.
+      return yield* Effect.acquireUseRelease(
+        makeEmptyWorkspace(plan.scenarioId),
+        (workspace) =>
+          createDockerContainer(preparedImage.image, workspace.dir, runtimeOpts, plan, agent).pipe(
+            Effect.map((containerId) =>
+              createDockerHandle({
+                agent,
+                plan,
+                workspaceDir: workspace.dir,
+                state: workspace.state,
+                containerId,
+                claudeArgs: runtimeOpts.claudeArgs ?? DEFAULT_CLAUDE_ARGS,
+                preparedImage,
+              }),
+            ),
+          ),
+        (workspace, exit) =>
+          Exit.isSuccess(exit)
+            ? Effect.void
+            : Effect.sync(() => {
+                try {
+                  rmSync(workspace.dir, { recursive: true, force: true });
+                } catch (error) {
+                  void error;
+                }
+              }),
+      );
     });
   }
 
@@ -168,28 +188,44 @@ export class SubprocessRuntime implements AgentRuntime {
   }
 
   prepare(agent: AgentDeclaration, plan: RunPlan): Effect.Effect<RuntimeHandle, AgentStartError, never> {
+    const opts = this.#opts;
     return Effect.suspend(() => {
-      if (!existsSync(this.#opts.bin)) {
+      if (!existsSync(opts.bin)) {
         return Effect.fail(
           new AgentStartError({
             scenarioId: plan.scenarioId,
             agentId: agent.id,
             cause: AgentStartErrorCause.BinaryNotFound({
-              path: this.#opts.bin,
+              path: opts.bin,
             }),
           }),
         );
       }
-      return makeEmptyWorkspace(plan.scenarioId).pipe(
-        Effect.map(({ dir, state }) =>
-          createSubprocessHandle({
-            agent,
-            plan,
-            workspaceDir: dir,
-            state,
-            opts: this.#opts,
-          }),
-        ),
+      // Mirror DockerRuntime.prepare: bind workspace cleanup to any non-success
+      // exit. createSubprocessHandle is sync today so this guards against
+      // future failure paths and fiber interruption between yield points.
+      return Effect.acquireUseRelease(
+        makeEmptyWorkspace(plan.scenarioId),
+        ({ dir, state }) =>
+          Effect.sync(() =>
+            createSubprocessHandle({
+              agent,
+              plan,
+              workspaceDir: dir,
+              state,
+              opts,
+            }),
+          ),
+        ({ dir }, exit) =>
+          Exit.isSuccess(exit)
+            ? Effect.void
+            : Effect.sync(() => {
+                try {
+                  rmSync(dir, { recursive: true, force: true });
+                } catch (error) {
+                  void error;
+                }
+              }),
       );
     });
   }
