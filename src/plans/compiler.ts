@@ -251,7 +251,16 @@ export function compilePlannedHarnessDocuments(
   documents: ReadonlyArray<LoadedHarnessPlanDocument>,
 ): Effect.Effect<ReadonlyArray<CompiledPlannedRun>, PlannedHarnessIngressError, never> {
   const cache = new Map<string, ImportedHarnessModule>();
-  return Effect.forEach(documents, (document) => compileOneDocument(document, cache));
+  // Sequential by design: harness module imports can have top-level
+  // side-effects (timer setup, network handles, global registration). The
+  // per-module cache is populated by the first import; running compile in
+  // parallel would race two importers for the same module before the cache
+  // entry lands and could fire any side-effects twice. Plan compile is
+  // already cheap (file read + import + load()), so the throughput cost of
+  // serialization is negligible.
+  return Effect.forEach(documents, (document) => compileOneDocument(document, cache), {
+    concurrency: 1,
+  });
 }
 
 export function runPlannedHarnessPath(
