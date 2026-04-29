@@ -186,25 +186,38 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
         writeSpy.mockRestore();
       }
 
+      type WalWarnLine = {
+        readonly event?: unknown;
+        readonly runId?: unknown;
+        readonly kind?: unknown;
+        readonly payloadPreview?: unknown;
+      };
+
       const afterCloseWarnings = stderrLines
-        .map((line) => {
+        .map((line): WalWarnLine | null => {
+          let parsed: unknown;
           try {
-            return JSON.parse(line.trim()) as Record<string, unknown>;
-          } catch {
+            parsed = JSON.parse(line.trim());
+          } catch (parseErr) {
+            // Non-JSON stderr noise (e.g., harness banners) is ignored;
+            // we only care about the structured WAL warnings here.
+            void parseErr;
             return null;
           }
+          if (typeof parsed !== "object" || parsed === null) return null;
+          return parsed as WalWarnLine;
         })
         .filter(
-          (parsed): parsed is Record<string, unknown> =>
-            parsed !== null && parsed["event"] === "append.after-close",
+          (parsed): parsed is WalWarnLine =>
+            parsed !== null && parsed.event === "append.after-close",
         );
 
       expect(afterCloseWarnings.length).toBe(1);
       const warning = afterCloseWarnings[0];
-      expect(warning?.["runId"]).toBe("run-post-close-warn");
-      expect(warning?.["kind"]).toBe(WAL_LINE_KIND.Event);
-      expect(typeof warning?.["payloadPreview"]).toBe("string");
-      expect(String(warning?.["payloadPreview"])).toContain("this-event-was-dropped");
+      expect(warning?.runId).toBe("run-post-close-warn");
+      expect(warning?.kind).toBe(WAL_LINE_KIND.Event);
+      expect(typeof warning?.payloadPreview).toBe("string");
+      expect(String(warning?.payloadPreview)).toContain("this-event-was-dropped");
     },
   );
 
