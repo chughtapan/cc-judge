@@ -28,11 +28,13 @@ import {
 } from "../src/emit/wal.js";
 import { RunId } from "../src/core/types.js";
 import { itEffect } from "./support/effect.js";
+import { captureStream } from "./support/streams.js";
+import { makeTempDir } from "./support/tmpdir.js";
 
 // ── Test fixture helpers ────────────────────────────────────────────────────
 
 function mkTmpResultsDir(tag: string): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `cc-judge-wal-${tag}-`));
+  return makeTempDir(`wal-${tag}`);
 }
 
 function readJsonl(file: string): ReadonlyArray<WalLine> {
@@ -158,6 +160,59 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
     // Two real lines pre-close (event + outcome). No third event line.
     expect(lines.length).toBe(2);
   });
+
+  itEffect(
+    "post-close append warning includes runId, kind, and payload preview",
+    function* () {
+      const resultsDir = mkTmpResultsDir("post-close-warn");
+      const paths = walPathsFromResultsDir(resultsDir);
+
+      const stderr = captureStream(process.stderr);
+      try {
+        yield* Effect.scoped(Effect.gen(function* () {
+          const handle = yield* openRunLog(RunId("run-post-close-warn"), paths);
+          yield* handle.close({ status: RUN_CLOSE_STATUS.Completed });
+          yield* handle.append({
+            kind: WAL_LINE_KIND.Event,
+            payload: { critical: "this-event-was-dropped", value: 42 },
+          });
+        }));
+      } finally {
+        stderr.restore();
+      }
+
+      type WalWarnLine = {
+        readonly event?: unknown;
+        readonly runId?: unknown;
+        readonly kind?: unknown;
+        readonly payloadPreview?: unknown;
+      };
+
+      const afterCloseWarnings = stderr.chunks
+        .map((line): WalWarnLine | null => {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(line.trim());
+          } catch (parseErr) {
+            void parseErr;
+            return null;
+          }
+          if (typeof parsed !== "object" || parsed === null) return null;
+          return parsed as WalWarnLine;
+        })
+        .filter(
+          (parsed): parsed is WalWarnLine =>
+            parsed !== null && parsed.event === "append.after-close",
+        );
+
+      expect(afterCloseWarnings.length).toBe(1);
+      const warning = afterCloseWarnings[0];
+      expect(warning?.runId).toBe("run-post-close-warn");
+      expect(warning?.kind).toBe(WAL_LINE_KIND.Event);
+      expect(typeof warning?.payloadPreview).toBe("string");
+      expect(String(warning?.payloadPreview)).toContain("this-event-was-dropped");
+    },
+  );
 
   itEffect("fs failures on the hot path are swallowed; run continues", function* () {
     // Pre-stage a DIRECTORY at the path where the WAL file should live.

@@ -11,6 +11,7 @@ import type {
   AgentTurn,
   Turn,
   WorkspaceDiff,
+  WorkspaceFileChange,
   IssueSeverity,
 } from "../core/types.js";
 import {
@@ -78,63 +79,66 @@ function withManagedAbortSignal<A, E>(
   );
 }
 
-function summarizeDiff(
-  diff: WorkspaceDiff | undefined,
-): { readonly changed: number; readonly added: number; readonly removed: number } {
-  if (diff === undefined) return { changed: 0, added: 0, removed: 0 };
-  let changed = 0;
-  let added = 0;
-  let removed = 0;
-  for (const c of diff.changed) {
-    if (c.before === null && c.after !== null) added += 1;
-    else if (c.before !== null && c.after === null) removed += 1;
-    else changed += 1;
-  }
-  return { changed, added, removed };
+interface DiffSummary {
+  readonly changed: number;
+  readonly added: number;
+  readonly removed: number;
 }
 
-function sumTurns(turns: ReadonlyArray<Turn>): {
+interface TurnAggregate {
   readonly toolCallCount: number;
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly cacheReadTokens: number;
   readonly cacheWriteTokens: number;
-} {
-  let toolCallCount = 0;
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cacheReadTokens = 0;
-  let cacheWriteTokens = 0;
-  for (const t of turns) {
-    toolCallCount += t.toolCallCount;
-    inputTokens += t.inputTokens;
-    outputTokens += t.outputTokens;
-    cacheReadTokens += t.cacheReadTokens;
-    cacheWriteTokens += t.cacheWriteTokens;
-  }
-  return { toolCallCount, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
 }
 
-function sumAgentTurns(turns: ReadonlyArray<AgentTurn> | undefined): {
-  readonly toolCallCount: number;
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheReadTokens: number;
-  readonly cacheWriteTokens: number;
-} {
-  if (turns === undefined) {
-    return {
-      toolCallCount: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-    };
-  }
-  return sumTurns(turns.map((entry) => entry.turn));
+const ZERO_TURN_AGGREGATE: TurnAggregate = {
+  toolCallCount: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+};
+
+function classifyChange(c: WorkspaceFileChange): keyof DiffSummary {
+  if (c.before === null && c.after !== null) return "added";
+  if (c.before !== null && c.after === null) return "removed";
+  return "changed";
 }
 
-function bundleModelName(bundle: JudgmentBundle): string {
+/** @internal — exported for direct property-based testing. */
+export function summarizeDiff(diff: WorkspaceDiff | undefined): DiffSummary {
+  return (diff?.changed ?? []).reduce<DiffSummary>(
+    (acc, c) => {
+      const bucket = classifyChange(c);
+      return { ...acc, [bucket]: acc[bucket] + 1 };
+    },
+    { changed: 0, added: 0, removed: 0 },
+  );
+}
+
+/** @internal — exported for direct property-based testing. */
+export function sumTurns(turns: ReadonlyArray<Turn>): TurnAggregate {
+  return turns.reduce<TurnAggregate>(
+    (acc, t) => ({
+      toolCallCount: acc.toolCallCount + t.toolCallCount,
+      inputTokens: acc.inputTokens + t.inputTokens,
+      outputTokens: acc.outputTokens + t.outputTokens,
+      cacheReadTokens: acc.cacheReadTokens + t.cacheReadTokens,
+      cacheWriteTokens: acc.cacheWriteTokens + t.cacheWriteTokens,
+    }),
+    ZERO_TURN_AGGREGATE,
+  );
+}
+
+/** @internal — exported for direct property-based testing. */
+export function sumAgentTurns(turns: ReadonlyArray<AgentTurn> | undefined): TurnAggregate {
+  return sumTurns((turns ?? []).map((entry) => entry.turn));
+}
+
+/** @internal — exported for direct property-based testing. */
+export function bundleModelName(bundle: JudgmentBundle): string {
   const modelName = bundle.metadata?.["modelName"];
   return typeof modelName === "string" && modelName.length > 0
     ? modelName
@@ -174,13 +178,10 @@ function buildBundleRecord(params: {
   };
 }
 
-function buildReport(runs: ReadonlyArray<RunRecord>, artifactsDir: string | undefined): Report {
-  let passed = 0;
-  let latencyTotal = 0;
-  for (const r of runs) {
-    if (r.pass) passed += 1;
-    latencyTotal += r.latencyMs;
-  }
+/** @internal — exported for direct property-based testing. */
+export function buildReport(runs: ReadonlyArray<RunRecord>, artifactsDir: string | undefined): Report {
+  const passed = runs.filter((r) => r.pass).length;
+  const latencyTotal = runs.reduce((sum, r) => sum + r.latencyMs, 0);
   const total = runs.length;
   return {
     runs,
@@ -479,7 +480,8 @@ function renderUnknownCoordinationFailure(
     : `unexpected coordination failure: ${detail}`;
 }
 
-function renderAgentStartCause(cause: AgentStartErrorCause): string {
+/** @internal — exported for direct property-based testing. */
+export function renderAgentStartCause(cause: AgentStartErrorCause): string {
   switch (cause._tag) {
     case "BuildContextMissing":
       return `build context missing at ${cause.path}`;
@@ -500,7 +502,8 @@ function renderAgentStartCause(cause: AgentStartErrorCause): string {
   }
 }
 
-function renderHarnessFailureCause(cause: HarnessExecutionCause): string {
+/** @internal — exported for direct property-based testing. */
+export function renderHarnessFailureCause(cause: HarnessExecutionCause): string {
   switch (cause._tag) {
     case "MissingRuntimeHandle":
       return `missing runtime handle for ${cause.agentId}`;
@@ -511,7 +514,8 @@ function renderHarnessFailureCause(cause: HarnessExecutionCause): string {
   }
 }
 
-function renderBundleBuildFailureCause(cause: BundleBuildCause): string {
+/** @internal — exported for direct property-based testing. */
+export function renderBundleBuildFailureCause(cause: BundleBuildCause): string {
   switch (cause._tag) {
     case "DuplicateOutcome":
       return `duplicate outcome emitted for ${cause.agentId}`;

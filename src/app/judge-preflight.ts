@@ -11,7 +11,12 @@ const CLAUDE_PREFLIGHT_TIMEOUT_MS = 5_000;
 const ANTHROPIC_AUTH_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
 const ANTHROPIC_AUTH_CACHE_FILE = "anthropic-auth-success.json";
 
-let cachedAnthropicAuthSuccessUntilMs: number | null = null;
+// No in-process cache by design: an in-memory layer would survive a
+// `claude logout` mid-process and serve stale "success" until the Node
+// process exits. Long-lived hosts (test runners, daemons) saw this as
+// silent staleness. Disk-only caching with a 24h TTL is the source of
+// truth; the cost is one extra `claude auth status` call (~50-200ms) on
+// the first cc-judge invocation per process.
 
 function shouldPreflightClaudeAuth(judgeBackend: string): boolean {
   if (judgeBackend !== "anthropic") {
@@ -64,13 +69,6 @@ function clearInvalidDiskCache(pathname: string): void {
 }
 
 function readAnthropicAuthCache(nowMs: number): boolean {
-  if (
-    cachedAnthropicAuthSuccessUntilMs !== null &&
-    cacheStillFresh(cachedAnthropicAuthSuccessUntilMs, nowMs)
-  ) {
-    return true;
-  }
-
   const cachePath = resolveAnthropicAuthCachePath();
   try {
     const parsed: unknown = JSON.parse(readFileSync(cachePath, "utf8"));
@@ -88,7 +86,6 @@ function readAnthropicAuthCache(nowMs: number): boolean {
       clearInvalidDiskCache(cachePath);
       return false;
     }
-    cachedAnthropicAuthSuccessUntilMs = expiresAtMs;
     return true;
   } catch (error) {
     if (error instanceof SyntaxError) {
@@ -107,7 +104,6 @@ function writeAnthropicAuthCache(nowMs: number): void {
   mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
   writeFileSync(tempPath, JSON.stringify(payload), "utf8");
   renameSync(tempPath, cachePath);
-  cachedAnthropicAuthSuccessUntilMs = nowMs + ANTHROPIC_AUTH_CACHE_TTL_MS;
 }
 
 export function ensureJudgeReady(judgeBackend: string): string | null {
@@ -154,8 +150,12 @@ export function ensureJudgeReady(judgeBackend: string): string | null {
   }
 }
 
+// Kept as an alias for backward-compat with existing test suites that
+// called both reset+clear in beforeEach. With no in-memory cache there is
+// no separate "memory" state to reset; both functions now clear the
+// disk cache.
 export function resetJudgePreflightCacheForTests(): void {
-  cachedAnthropicAuthSuccessUntilMs = null;
+  clearInvalidDiskCache(resolveAnthropicAuthCachePath());
 }
 
 export function clearJudgePreflightDiskCacheForTests(): void {

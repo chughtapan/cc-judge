@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 import { PromptfooEmitter } from "../src/emit/observability.js";
 import { ScenarioId, RunNumber, RUN_SOURCE, ISSUE_SEVERITY } from "../src/core/types.js";
 import type { RunRecord, Report } from "../src/core/schema.js";
 import { itEffect } from "./support/effect.js";
+import { makeTempDir } from "./support/tmpdir.js";
 
 const NAME_BRAINTRUST = "braintrust";
 const NAME_PROMPTFOO = "promptfoo";
@@ -69,13 +69,13 @@ function makeReport(records: ReadonlyArray<RunRecord>): Report {
 
 describe("PromptfooEmitter", () => {
   it("exposes .name = 'promptfoo'", () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-promptfoo-"));
+    const dir = makeTempDir("promptfoo");
     const e = new PromptfooEmitter({ outputPath: path.join(dir, "r.json") });
     expect(e.name).toBe(NAME_PROMPTFOO);
   });
 
   itEffect("onRun is a no-op Effect that writes nothing", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-promptfoo-"));
+    const dir = makeTempDir("promptfoo");
     const file = path.join(dir, "out.json");
     const e = new PromptfooEmitter({ outputPath: file });
     yield* e.onRun({ record: makeRecord(SCEN_A, true, INPUT_TOKENS_A, OUTPUT_TOKENS_A) });
@@ -83,7 +83,7 @@ describe("PromptfooEmitter", () => {
   });
 
   itEffect("onReport writes a promptfoo-v3 JSON file with per-run rows and aggregated stats", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-promptfoo-"));
+    const dir = makeTempDir("promptfoo");
     const file = path.join(dir, "sub", "results.json");
     const e = new PromptfooEmitter({ outputPath: file });
     const report = makeReport([
@@ -134,7 +134,7 @@ describe("PromptfooEmitter", () => {
   });
 
   itEffect("onReport with empty report still writes a valid envelope", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-promptfoo-"));
+    const dir = makeTempDir("promptfoo");
     const file = path.join(dir, "empty.json");
     const e = new PromptfooEmitter({ outputPath: file });
     yield* e.onReport({

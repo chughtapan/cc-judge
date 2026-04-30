@@ -1,7 +1,5 @@
-import { mkdtempSync } from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import { describe, expect, vi } from "vitest";
+import { makeTempDir } from "./support/tmpdir.js";
 
 const { randomUUIDMock } = vi.hoisted(() => ({
   randomUUIDMock: vi.fn(),
@@ -91,7 +89,7 @@ describe("runWithHarness failure folding", () => {
     const report = yield* runWithHarness(makePlan(), unusedHarness, {
       coordinator,
       judge,
-      resultsDir: mkdtempSync(path.join(os.tmpdir(), "cc-judge-fold-start-")),
+      resultsDir: makeTempDir("fold-start"),
     });
 
     expect(judgeCalled).toBe(false);
@@ -128,7 +126,7 @@ describe("runWithHarness failure folding", () => {
       coordinator,
       judge,
       abortSignal: abortController.signal,
-      resultsDir: mkdtempSync(path.join(os.tmpdir(), "cc-judge-fold-cancel-")),
+      resultsDir: makeTempDir("fold-cancel"),
     });
 
     expect(report.summary.failed).toBe(1);
@@ -163,12 +161,12 @@ describe("runWithHarness failure folding", () => {
       yield* runWithHarness(makePlan(), unusedHarness, {
         coordinator,
         judge,
-        resultsDir: mkdtempSync(path.join(os.tmpdir(), "cc-judge-fold-runid-1-")),
+        resultsDir: makeTempDir("fold-runid-1"),
       });
       yield* runWithHarness(makePlan(), unusedHarness, {
         coordinator,
         judge,
-        resultsDir: mkdtempSync(path.join(os.tmpdir(), "cc-judge-fold-runid-2-")),
+        resultsDir: makeTempDir("fold-runid-2"),
       });
       expect(randomUUIDMock.mock.calls.length).toBeGreaterThanOrEqual(2);
     } finally {

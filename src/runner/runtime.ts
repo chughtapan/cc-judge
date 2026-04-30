@@ -1,16 +1,17 @@
-import { Effect } from "effect";
-import { execSync, spawn, type ChildProcess } from "node:child_process";
+import Docker from "dockerode";
+import * as tarFs from "tar-fs";
+import { Effect, Exit } from "effect";
+import { spawn, type ChildProcess } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { computeDiff, parseStreamJson, walkWorkspace } from "./helpers.js";
 import {
   AgentRunTimeoutError,
   AgentStartError,
@@ -25,10 +26,17 @@ import type {
   Turn,
   WorkspaceDiff,
   WorkspaceFile,
-  WorkspaceFileChange,
 } from "../core/types.js";
 
 const DEFAULT_CLAUDE_ARGS: ReadonlyArray<string> = ["-p", "--output-format", "stream-json", "--verbose"];
+
+// One Docker client per process. Defaults to the local socket
+// (/var/run/docker.sock on POSIX, named pipe on Windows). All Docker
+// lifecycle operations — build, pull, inspect, create, kill, remove —
+// flow through this client. Prompt execution still uses `docker exec`
+// via spawn() because the streaming stdout parse needs a real
+// child-process lifecycle; that's a follow-up.
+const docker = new Docker();
 
 interface MutableWorkspaceState {
   readonly baselineFiles: Map<string, string>;
@@ -67,29 +75,6 @@ export interface SubprocessRuntimeOpts {
   readonly extraArgs?: ReadonlyArray<string>;
 }
 
-interface ParsedTurn {
-  readonly response: string;
-  readonly toolCallCount: number;
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheReadTokens: number;
-  readonly cacheWriteTokens: number;
-}
-
-interface StreamJsonEvent {
-  readonly type?: unknown;
-  readonly content?: unknown;
-  readonly result?: unknown;
-  readonly usage?: unknown;
-}
-
-interface StreamJsonUsage {
-  readonly input_tokens?: unknown;
-  readonly output_tokens?: unknown;
-  readonly cache_read_input_tokens?: unknown;
-  readonly cache_creation_input_tokens?: unknown;
-}
-
 interface PreparedImage {
   readonly image: string;
   readonly removeOnStop: boolean;
@@ -111,49 +96,68 @@ export class DockerRuntime implements AgentRuntime {
     const runtimeOpts = this.#opts;
     return Effect.gen(function* () {
       const preparedImage = yield* materializeImage(agent, plan);
-      const workspace = yield* makeEmptyWorkspace(plan.scenarioId);
-      const containerId = yield* createDockerContainer(preparedImage.image, workspace.dir, runtimeOpts, plan, agent);
-      return createDockerHandle({
-        agent,
-        plan,
-        workspaceDir: workspace.dir,
-        state: workspace.state,
-        containerId,
-        claudeArgs: runtimeOpts.claudeArgs ?? DEFAULT_CLAUDE_ARGS,
-        preparedImage,
-      });
+      // Workspace is acquired before container creation; release deletes it
+      // on any non-success exit (failure or interrupt) so partial-prepare
+      // failures cannot leak tmpdirs. On success, the returned handle owns
+      // the workspace and stop() handles cleanup.
+      return yield* Effect.acquireUseRelease(
+        makeEmptyWorkspace(plan.scenarioId),
+        (workspace) =>
+          createDockerContainer(preparedImage.image, workspace.dir, runtimeOpts, plan, agent).pipe(
+            Effect.map((containerId) =>
+              createDockerHandle({
+                agent,
+                plan,
+                workspaceDir: workspace.dir,
+                state: workspace.state,
+                containerId,
+                claudeArgs: runtimeOpts.claudeArgs ?? DEFAULT_CLAUDE_ARGS,
+                preparedImage,
+              }),
+            ),
+          ),
+        (workspace, exit) =>
+          Exit.isSuccess(exit)
+            ? Effect.void
+            : Effect.sync(() => {
+                try {
+                  rmSync(workspace.dir, { recursive: true, force: true });
+                } catch (error) {
+                  void error;
+                }
+              }),
+      );
     });
   }
 
   stop(handle: RuntimeHandle): Effect.Effect<void, never, never> {
-    return Effect.sync(() => {
-      const dockerHandle = handle as RuntimeHandle & {
-        readonly containerId?: string;
-        readonly preparedImage?: PreparedImage;
-      };
+    const dockerHandle = handle as RuntimeHandle & {
+      readonly containerId?: string;
+      readonly preparedImage?: PreparedImage;
+    };
+    return Effect.gen(function* () {
       if (dockerHandle.containerId !== undefined && dockerHandle.containerId.length > 0) {
+        const container = docker.getContainer(dockerHandle.containerId);
+        // Best-effort: an already-stopped container or one that AutoRemove
+        // already reaped both throw — those are expected on the cleanup
+        // path and not worth surfacing.
+        yield* Effect.tryPromise(() => container.kill()).pipe(Effect.catchAll(() => Effect.void));
+        yield* Effect.tryPromise(() => container.remove({ force: true })).pipe(
+          Effect.catchAll(() => Effect.void),
+        );
+      }
+      yield* Effect.sync(() => {
         try {
-          execSync(`docker kill ${shellQuote(dockerHandle.containerId)}`, { stdio: "ignore" });
+          rmSync(handle.workspaceDir, { recursive: true, force: true });
         } catch (error) {
           void error;
         }
-        try {
-          execSync(`docker rm -f ${shellQuote(dockerHandle.containerId)}`, { stdio: "ignore" });
-        } catch (error) {
-          void error;
-        }
-      }
-      try {
-        rmSync(handle.workspaceDir, { recursive: true, force: true });
-      } catch (error) {
-        void error;
-      }
+      });
       if (dockerHandle.preparedImage?.removeOnStop === true) {
-        try {
-          execSync(`docker image rm -f ${shellQuote(dockerHandle.preparedImage.image)}`, { stdio: "ignore" });
-        } catch (error) {
-          void error;
-        }
+        const imageName = dockerHandle.preparedImage.image;
+        yield* Effect.tryPromise(() => docker.getImage(imageName).remove({ force: true })).pipe(
+          Effect.catchAll(() => Effect.void),
+        );
       }
     });
   }
@@ -168,28 +172,44 @@ export class SubprocessRuntime implements AgentRuntime {
   }
 
   prepare(agent: AgentDeclaration, plan: RunPlan): Effect.Effect<RuntimeHandle, AgentStartError, never> {
+    const opts = this.#opts;
     return Effect.suspend(() => {
-      if (!existsSync(this.#opts.bin)) {
+      if (!existsSync(opts.bin)) {
         return Effect.fail(
           new AgentStartError({
             scenarioId: plan.scenarioId,
             agentId: agent.id,
             cause: AgentStartErrorCause.BinaryNotFound({
-              path: this.#opts.bin,
+              path: opts.bin,
             }),
           }),
         );
       }
-      return makeEmptyWorkspace(plan.scenarioId).pipe(
-        Effect.map(({ dir, state }) =>
-          createSubprocessHandle({
-            agent,
-            plan,
-            workspaceDir: dir,
-            state,
-            opts: this.#opts,
-          }),
-        ),
+      // createSubprocessHandle is sync today; the acquireUseRelease shape
+      // guards against future failure paths and fiber interruption between
+      // yield points so the workspace cannot leak.
+      return Effect.acquireUseRelease(
+        makeEmptyWorkspace(plan.scenarioId),
+        ({ dir, state }) =>
+          Effect.sync(() =>
+            createSubprocessHandle({
+              agent,
+              plan,
+              workspaceDir: dir,
+              state,
+              opts,
+            }),
+          ),
+        ({ dir }, exit) =>
+          Exit.isSuccess(exit)
+            ? Effect.void
+            : Effect.sync(() => {
+                try {
+                  rmSync(dir, { recursive: true, force: true });
+                } catch (error) {
+                  void error;
+                }
+              }),
       );
     });
   }
@@ -542,51 +562,112 @@ function buildDockerImage(
       }),
     );
   }
-  return Effect.try({
-    try: () => {
-      const contextPath = path.resolve(artifact.contextPath);
-      if (!existsSync(contextPath)) {
-        throw new AgentStartError({
+  return Effect.suspend(() => {
+    const contextPath = path.resolve(artifact.contextPath);
+    if (!existsSync(contextPath)) {
+      return Effect.fail(
+        new AgentStartError({
           scenarioId: plan.scenarioId,
           agentId: agent.id,
           cause: AgentStartErrorCause.BuildContextMissing({
             path: contextPath,
           }),
-        });
-      }
-      const autoTag = `cc-judge-${sanitizeId(plan.scenarioId)}-${sanitizeId(agent.id)}-${Date.now()}`;
-      const imageTag = artifact.imageTag ?? autoTag;
-      const dockerfilePath = artifact.dockerfilePath !== undefined
-        ? path.resolve(contextPath, artifact.dockerfilePath)
-        : undefined;
-      const args = [
-        "build",
-        "-t",
-        imageTag,
-        ...(dockerfilePath !== undefined ? ["-f", dockerfilePath] : []),
-        ...(artifact.target !== undefined ? ["--target", artifact.target] : []),
-        ...renderBuildArgs(artifact.buildArgs),
-        contextPath,
-      ];
-      execSync(`docker ${args.map(shellQuote).join(" ")}`, { stdio: "pipe" });
-      return {
-        image: imageTag,
-        removeOnStop: artifact.imageTag === undefined,
-      };
-    },
-    catch: (error) => {
-      if (error instanceof AgentStartError) {
-        return error;
-      }
-      return new AgentStartError({
-        scenarioId: plan.scenarioId,
-        agentId: agent.id,
-        cause: AgentStartErrorCause.DockerBuildFailed({
-          message: error instanceof Error ? error.message : String(error),
         }),
-      });
-    },
+      );
+    }
+    const autoTag = `cc-judge-${sanitizeId(plan.scenarioId)}-${sanitizeId(agent.id)}-${Date.now()}`;
+    const imageTag = artifact.imageTag ?? autoTag;
+    const ownsTag = artifact.imageTag === undefined;
+    // dockerode wants Dockerfile as a path RELATIVE to the build context
+    // (it embeds the file inside the streamed tarball); resolve to the
+    // relative form whether or not the user passed an absolute path.
+    const dockerfileRel = artifact.dockerfilePath !== undefined
+      ? path.relative(contextPath, path.resolve(contextPath, artifact.dockerfilePath))
+      : undefined;
+    const buildOpts: Docker.ImageBuildOptions = {
+      t: imageTag,
+      ...(dockerfileRel !== undefined ? { dockerfile: dockerfileRel } : {}),
+      ...(artifact.target !== undefined ? { target: artifact.target } : {}),
+      ...(artifact.buildArgs !== undefined ? { buildargs: { ...artifact.buildArgs } } : {}),
+    };
+    return runDockerBuild(contextPath, buildOpts).pipe(
+      Effect.matchEffect({
+        onSuccess: () =>
+          Effect.succeed({ image: imageTag, removeOnStop: ownsTag }),
+        onFailure: (message) =>
+          // Best-effort cleanup of partial image when we own the tag.
+          // Docker build can leave a tagged-but-incomplete image if it
+          // fails after `-t` takes effect; without this, autoTag-named
+          // artifacts accumulate forever. User-supplied tags are left
+          // alone — their lifecycle belongs to the user.
+          (ownsTag ? bestEffortRemoveImage(imageTag) : Effect.void).pipe(
+            Effect.flatMap(() =>
+              Effect.fail(
+                new AgentStartError({
+                  scenarioId: plan.scenarioId,
+                  agentId: agent.id,
+                  cause: AgentStartErrorCause.DockerBuildFailed({ message }),
+                }),
+              ),
+            ),
+          ),
+      }),
+    );
   });
+}
+
+// Build the image via dockerode + tar-fs. tar-fs.pack streams the
+// context dir without writing intermediate files; followProgress drains
+// the build response stream to completion and surfaces any errorDetail
+// frame as the failure message. Returns the build error message
+// directly so the caller can wrap it without parsing.
+function runDockerBuild(
+  contextPath: string,
+  buildOpts: Docker.ImageBuildOptions,
+): Effect.Effect<void, string, never> {
+  return Effect.tryPromise({
+    try: () => docker.buildImage(tarFs.pack(contextPath), buildOpts),
+    catch: (err) => (err instanceof Error ? err.message : String(err)),
+  }).pipe(Effect.flatMap(drainBuildStream));
+}
+
+interface DockerStreamFrame {
+  readonly stream?: string;
+  readonly error?: string;
+  readonly errorDetail?: { readonly message?: string };
+}
+
+// Drain the demuxed JSON-frame stream that `buildImage` and `pull`
+// return. Yields void on a clean run; fails with the concatenated error
+// messages from any errorDetail/error frames, or the followProgress
+// callback's err arg.
+function drainBuildStream(stream: NodeJS.ReadableStream): Effect.Effect<void, string, never> {
+  return Effect.async<void, string>((resume) => {
+    docker.modem.followProgress(stream, (err, output) => {
+      if (err !== null) {
+        resume(Effect.fail(err instanceof Error ? err.message : String(err)));
+        return;
+      }
+      const frames = (output ?? []) as ReadonlyArray<DockerStreamFrame>;
+      const errors = frames
+        .map((frame) => frame.errorDetail?.message ?? frame.error)
+        .filter((message): message is string => typeof message === "string" && message.length > 0);
+      if (errors.length > 0) {
+        resume(Effect.fail(errors.join("; ")));
+        return;
+      }
+      resume(Effect.void);
+    });
+  });
+}
+
+// Cleanup helpers. Both swallow internally — they only run on a
+// failure/teardown path where surfacing a secondary error would mask
+// the primary one.
+function bestEffortRemoveImage(image: string): Effect.Effect<void, never, never> {
+  return Effect.tryPromise(() => docker.getImage(image).remove({ force: true })).pipe(
+    Effect.catchAll(() => Effect.void),
+  );
 }
 
 function ensureDockerImage(
@@ -605,61 +686,53 @@ function ensureDockerImage(
       }),
     );
   }
-  return Effect.try({
-    try: () => {
-      const image = artifact.image;
-      const pullPolicy = artifact.pullPolicy ?? "if-missing";
-      const imageAvailable = dockerImageExists(image);
-      if (pullPolicy === "always" || (pullPolicy === "if-missing" && !imageAvailable)) {
-        try {
-          execSync(`docker pull ${shellQuote(image)}`, { stdio: "pipe" });
-        } catch (error) {
-          throw new AgentStartError({
-            scenarioId: plan.scenarioId,
-            agentId: agent.id,
-            cause: AgentStartErrorCause.ImagePullFailed({
-              image,
-              message: error instanceof Error ? error.message : String(error),
+  const image = artifact.image;
+  const pullPolicy = artifact.pullPolicy ?? "if-missing";
+  return Effect.gen(function* () {
+    const initiallyExists = yield* dockerImageExists(image);
+    if (pullPolicy === "always" || (pullPolicy === "if-missing" && !initiallyExists)) {
+      yield* runDockerPull(image).pipe(
+        Effect.mapError(
+          (message) =>
+            new AgentStartError({
+              scenarioId: plan.scenarioId,
+              agentId: agent.id,
+              cause: AgentStartErrorCause.ImagePullFailed({ image, message }),
             }),
-          });
-        }
-      }
-      if (pullPolicy === "never" && !imageAvailable) {
-        throw new AgentStartError({
+        ),
+      );
+    }
+    if (pullPolicy === "never" && !initiallyExists) {
+      return yield* Effect.fail(
+        new AgentStartError({
           scenarioId: plan.scenarioId,
           agentId: agent.id,
-          cause: AgentStartErrorCause.ImageMissing({
-            image,
-          }),
-        });
-      }
-      if (!dockerImageExists(image)) {
-        throw new AgentStartError({
-          scenarioId: plan.scenarioId,
-          agentId: agent.id,
-          cause: AgentStartErrorCause.ImageMissing({
-            image,
-          }),
-        });
-      }
-      return {
-        image,
-        removeOnStop: false,
-      };
-    },
-    catch: (error) => {
-      if (error instanceof AgentStartError) {
-        return error;
-      }
-      return new AgentStartError({
-        scenarioId: plan.scenarioId,
-        agentId: agent.id,
-        cause: AgentStartErrorCause.ImageMissing({
-          image: artifact.image,
+          cause: AgentStartErrorCause.ImageMissing({ image }),
         }),
-      });
-    },
+      );
+    }
+    // Re-check after the pull attempt — pull(...) returning success
+    // doesn't guarantee the image is locally available (rare, but a
+    // partial pull aborted by the daemon would land us here).
+    const finalExists = yield* dockerImageExists(image);
+    if (!finalExists) {
+      return yield* Effect.fail(
+        new AgentStartError({
+          scenarioId: plan.scenarioId,
+          agentId: agent.id,
+          cause: AgentStartErrorCause.ImageMissing({ image }),
+        }),
+      );
+    }
+    return { image, removeOnStop: false };
   });
+}
+
+function runDockerPull(image: string): Effect.Effect<void, string, never> {
+  return Effect.tryPromise({
+    try: () => docker.pull(image) as Promise<NodeJS.ReadableStream>,
+    catch: (err) => (err instanceof Error ? err.message : String(err)),
+  }).pipe(Effect.flatMap(drainBuildStream));
 }
 
 function createDockerContainer(
@@ -669,210 +742,53 @@ function createDockerContainer(
   plan: RunPlan,
   agent: AgentDeclaration,
 ): Effect.Effect<string, AgentStartError, never> {
-  return Effect.try({
-    try: () => {
-      const args = [
-        "create",
-        "--rm",
-        "-v",
-        `${workspaceDir}:/workspace`,
-        "-w",
-        "/workspace",
-        "--network",
-        opts.network ?? "none",
-        ...(opts.memoryMb !== undefined ? ["--memory", `${opts.memoryMb}m`] : []),
-        ...(opts.cpus !== undefined ? ["--cpus", String(opts.cpus)] : []),
-        image,
-        "tail",
-        "-f",
-        "/dev/null",
-      ];
-      const containerId = execSync(`docker ${args.map(shellQuote).join(" ")}`, { stdio: "pipe" })
-        .toString("utf8")
-        .trim();
-      execSync(`docker start ${shellQuote(containerId)}`, { stdio: "ignore" });
-      return containerId;
+  const config: Docker.ContainerCreateOptions = {
+    Image: image,
+    // tail -f keeps the container alive while we issue `docker exec`
+    // calls for each prompt turn.
+    Cmd: ["tail", "-f", "/dev/null"],
+    WorkingDir: "/workspace",
+    HostConfig: {
+      Binds: [`${workspaceDir}:/workspace`],
+      NetworkMode: opts.network ?? "none",
+      // No AutoRemove: stop() handles removal explicitly via dockerode's
+      // synchronous remove(). AutoRemove triggers daemon-side async cleanup
+      // that races with our remove() call, leaving stop() callers unable
+      // to assume the container is gone when stop() resolves.
+      ...(opts.memoryMb !== undefined ? { Memory: opts.memoryMb * 1024 * 1024 } : {}),
+      ...(opts.cpus !== undefined ? { NanoCpus: Math.round(opts.cpus * 1_000_000_000) } : {}),
     },
-    catch: (error) =>
-      new AgentStartError({
-        scenarioId: plan.scenarioId,
-        agentId: agent.id,
-        cause: AgentStartErrorCause.ContainerStartFailed({
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      }),
-  });
-}
-
-function parseStreamJson(stdout: string): ParsedTurn {
-  let response = "";
-  let toolCallCount = 0;
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cacheReadTokens = 0;
-  let cacheWriteTokens = 0;
-  let sawStructured = false;
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
-      continue;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch (error) {
-      void error;
-      continue;
-    }
-    if (typeof parsed !== "object" || parsed === null) {
-      continue;
-    }
-    sawStructured = true;
-    const obj: StreamJsonEvent = parsed;
-    const type = typeof obj.type === "string" ? obj.type : "";
-    switch (type) {
-      case "assistant":
-        if (typeof obj.content === "string") {
-          response += obj.content;
-        }
-        break;
-      case "result":
-        if (typeof obj.result === "string" && response.length === 0) {
-          response = obj.result;
-        }
-        break;
-      case "tool_use":
-      case "tool_call":
-        toolCallCount += 1;
-        break;
-      default:
-        break;
-    }
-    const usage = obj.usage;
-    if (typeof usage === "object" && usage !== null) {
-      const tokens: StreamJsonUsage = usage;
-      if (typeof tokens.input_tokens === "number") {
-        inputTokens += tokens.input_tokens;
-      }
-      if (typeof tokens.output_tokens === "number") {
-        outputTokens += tokens.output_tokens;
-      }
-      if (typeof tokens.cache_read_input_tokens === "number") {
-        cacheReadTokens += tokens.cache_read_input_tokens;
-      }
-      if (typeof tokens.cache_creation_input_tokens === "number") {
-        cacheWriteTokens += tokens.cache_creation_input_tokens;
-      }
-    }
-  }
-  if (!sawStructured) {
-    response = stdout;
-  }
-  return {
-    response,
-    toolCallCount,
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
   };
-}
-
-function walkWorkspace(dir: string): Effect.Effect<ReadonlyMap<string, string>, never, never> {
-  const output = new Map<string, string>();
-  return walkInto(dir, dir, output).pipe(Effect.map(() => output as ReadonlyMap<string, string>));
-}
-
-function walkInto(
-  root: string,
-  currentDir: string,
-  output: Map<string, string>,
-): Effect.Effect<void, never, never> {
+  const containerStartFailed = (error: unknown): AgentStartError =>
+    new AgentStartError({
+      scenarioId: plan.scenarioId,
+      agentId: agent.id,
+      cause: AgentStartErrorCause.ContainerStartFailed({
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    });
   return Effect.tryPromise({
-    try: () => readdir(currentDir, { withFileTypes: true }),
-    catch: () => [],
+    try: () => docker.createContainer(config),
+    catch: containerStartFailed,
   }).pipe(
-    Effect.catchAll(() => Effect.succeed([])),
-    Effect.flatMap((entries) =>
-      Effect.forEach(
-        entries,
-        (entry) => {
-          const absolutePath = path.join(currentDir, entry.name);
-          if (entry.isDirectory()) {
-            return walkInto(root, absolutePath, output);
-          }
-          if (!entry.isFile()) {
-            return Effect.void;
-          }
-          return Effect.tryPromise({
-            try: () => readFile(absolutePath, "utf8"),
-            catch: () => null,
-          }).pipe(
-            Effect.match({
-              onFailure: () => undefined,
-              onSuccess: (content: string | null) => {
-                if (content !== null) {
-                  output.set(path.relative(root, absolutePath), content);
-                }
-              },
-            }),
-          );
-        },
-        { discard: true },
-      ),
+    Effect.flatMap((container) =>
+      Effect.tryPromise({
+        try: () => container.start(),
+        catch: containerStartFailed,
+      }).pipe(Effect.as(container.id)),
     ),
   );
 }
 
-function computeDiff(
-  baseline: ReadonlyMap<string, string>,
-  current: ReadonlyMap<string, string>,
-): WorkspaceDiff {
-  const changed: WorkspaceFileChange[] = [];
-  const seen = new Set<string>();
-  for (const [relativePath, before] of baseline) {
-    seen.add(relativePath);
-    const after = current.get(relativePath);
-    if (after === undefined) {
-      changed.push({ path: relativePath, before, after: null });
-    } else if (after !== before) {
-      changed.push({ path: relativePath, before, after });
-    }
-  }
-  for (const [relativePath, after] of current) {
-    if (!seen.has(relativePath)) {
-      changed.push({ path: relativePath, before: null, after });
-    }
-  }
-  return { changed };
-}
-
-function dockerImageExists(image: string): boolean {
-  try {
-    execSync(`docker image inspect ${shellQuote(image)}`, { stdio: "ignore" });
-    return true;
-  } catch (error) {
-    void error;
-    return false;
-  }
-}
-
-function renderBuildArgs(buildArgs: Readonly<Record<string, string>> | undefined): ReadonlyArray<string> {
-  if (buildArgs === undefined) {
-    return [];
-  }
-  return Object.entries(buildArgs).flatMap(([key, value]) => ["--build-arg", `${key}=${value}`]);
+function dockerImageExists(image: string): Effect.Effect<boolean, never, never> {
+  return Effect.tryPromise(() => docker.getImage(image).inspect()).pipe(
+    Effect.match({
+      onSuccess: () => true,
+      onFailure: () => false,
+    }),
+  );
 }
 
 function sanitizeId(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]/gu, "-");
 }
-
-function shellQuote(value: string): string {
-  if (/^[A-Za-z0-9_:@./=-]+$/u.test(value)) {
-    return value;
-  }
-  return `'${value.replace(/'/gu, `'\\''`)}'`;
-}
-
-void readFileSync;

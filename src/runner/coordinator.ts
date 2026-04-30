@@ -181,28 +181,29 @@ export function makeNormalizedBundleSink(
 
   return {
     recordTurn(turn) {
-      return Effect.sync(() => {
+      return Effect.suspend(() => {
         if (turn.agentId !== undefined && !knownAgents.has(turn.agentId)) {
-          throw new BundleBuildError({
-            cause: BundleBuildCause.UnknownAgent({
-              agentId: turn.agentId,
+          return Effect.fail(
+            new BundleBuildError({
+              cause: BundleBuildCause.UnknownAgent({ agentId: turn.agentId }),
             }),
-          });
+          );
         }
         turns.push(turn);
-      }).pipe(Effect.catchAll(asBundleBuildError));
+        return Effect.void;
+      });
     },
 
     recordEvent(event) {
       return Effect.sync(() => {
         events.push(event);
-      }).pipe(Effect.catchAll(asBundleBuildError));
+      });
     },
 
     recordPhase(phase) {
       return Effect.sync(() => {
         phases.push(phase);
-      }).pipe(Effect.catchAll(asBundleBuildError));
+      });
     },
 
     recordContextPatch(patch) {
@@ -211,46 +212,47 @@ export function makeNormalizedBundleSink(
           ...(context ?? {}),
           ...patch,
         };
-      }).pipe(Effect.catchAll(asBundleBuildError));
+      });
     },
 
     setWorkspaceDiff(diff) {
       return Effect.sync(() => {
         workspaceDiff = diff;
-      }).pipe(Effect.catchAll(asBundleBuildError));
+      });
     },
 
     recordOutcome(outcome) {
-      return Effect.sync(() => {
+      return Effect.suspend(() => {
         if (!knownAgents.has(outcome.agentId)) {
-          throw new BundleBuildError({
-            cause: BundleBuildCause.UnknownAgent({
-              agentId: outcome.agentId,
+          return Effect.fail(
+            new BundleBuildError({
+              cause: BundleBuildCause.UnknownAgent({ agentId: outcome.agentId }),
             }),
-          });
+          );
         }
         if (outcomes.has(outcome.agentId)) {
-          throw new BundleBuildError({
-            cause: BundleBuildCause.DuplicateOutcome({
-              agentId: outcome.agentId,
+          return Effect.fail(
+            new BundleBuildError({
+              cause: BundleBuildCause.DuplicateOutcome({ agentId: outcome.agentId }),
             }),
-          });
+          );
         }
         outcomes.set(outcome.agentId, outcome);
-      }).pipe(Effect.catchAll(asBundleBuildError));
+        return Effect.void;
+      });
     },
 
     finalize() {
-      return Effect.sync(() => {
+      return Effect.suspend(() => {
         const missingOutcomes = plan.agents
           .map((agent) => agent.id)
           .filter((agentId) => !outcomes.has(agentId));
         if (missingOutcomes.length > 0) {
-          throw new BundleBuildError({
-            cause: BundleBuildCause.MissingOutcomes({
-              agentIds: missingOutcomes,
+          return Effect.fail(
+            new BundleBuildError({
+              cause: BundleBuildCause.MissingOutcomes({ agentIds: missingOutcomes }),
             }),
-          });
+          );
         }
         const bundle: JudgmentBundle = {
           runId: RunId(runId),
@@ -269,14 +271,14 @@ export function makeNormalizedBundleSink(
         };
         const errors = formatSchemaErrors(Value.Errors(JudgmentBundleSchema, bundle));
         if (errors.length > 0) {
-          throw new BundleBuildError({
-            cause: BundleBuildCause.SchemaInvalid({
-              errors,
+          return Effect.fail(
+            new BundleBuildError({
+              cause: BundleBuildCause.SchemaInvalid({ errors }),
             }),
-          });
+          );
         }
-        return bundle;
-      }).pipe(Effect.catchAll(asBundleBuildError));
+        return Effect.succeed(bundle);
+      });
     },
   };
 }
@@ -402,18 +404,6 @@ function sortPhases(phases: ReadonlyArray<Phase>): ReadonlyArray<Phase> {
   return [...phases].sort((left, right) => left.tsStart - right.tsStart);
 }
 
-function asBundleBuildError(error: unknown): Effect.Effect<never, BundleBuildError, never> {
-  if (error instanceof BundleBuildError) {
-    return Effect.fail(error);
-  }
-  return Effect.fail(
-    new BundleBuildError({
-      cause: BundleBuildCause.SchemaInvalid({
-        errors: [error instanceof Error ? error.message : String(error)],
-      }),
-    }),
-  );
-}
 
 function mapRunCoordinationError(error: unknown): RunCoordinationError {
   if (error instanceof RunCoordinationError) {

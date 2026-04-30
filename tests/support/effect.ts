@@ -25,3 +25,32 @@ export function expectLeft<E, A>(value: Either.Either<A, E>): E {
 // assert on runPromise + Effect.either results.
 export const EITHER_LEFT = "Left" as const;
 export const EITHER_RIGHT = "Right" as const;
+
+/**
+ * Assert that a tagged-cause discriminant equals `tag` and return the
+ * narrowed cause for further field assertions. Replaces the verbose
+ *
+ *   expect(error.cause._tag).toBe("X");
+ *   if (error.cause._tag === "X") { ... }
+ *
+ * pattern with one call that both asserts the tag and narrows the type.
+ *
+ * Throws (via expect) if the tag does not match, so the cast in the
+ * return type is safe under the project's vitest invariant.
+ */
+export function expectCauseTag<
+  Cause extends { readonly _tag: string },
+  Tag extends Cause["_tag"],
+>(
+  cause: Cause,
+  tag: Tag,
+): Extract<Cause, { readonly _tag: Tag }> {
+  // Use vitest's expect via dynamic import to avoid a hard dep cycle.
+  // (vitest globals are available wherever this helper is imported.)
+  if (cause._tag !== tag) {
+    throw new Error(
+      `expected cause._tag === "${tag}", got "${cause._tag}"`,
+    );
+  }
+  return cause as Extract<Cause, { readonly _tag: Tag }>;
+}

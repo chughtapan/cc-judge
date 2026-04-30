@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, vi } from "vitest";
 import { Effect } from "effect";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { makeTempDir } from "./support/tmpdir.js";
 import * as YAML from "yaml";
 import { main } from "../src/app/cli.js";
 import {
@@ -14,6 +15,7 @@ import {
 } from "../src/plans/index.js";
 import { itEffect, EITHER_LEFT } from "./support/effect.js";
 import { installDefaultEnvVar } from "./support/env.js";
+import { captureStream } from "./support/streams.js";
 
 installDefaultEnvVar("ANTHROPIC_API_KEY", "test-anthropic-api-key");
 
@@ -106,22 +108,6 @@ function writePlanFile(dir: string, name: string, yaml: string): string {
   return filePath;
 }
 
-function installStderrCapture(): { readonly chunks: string[]; readonly restore: () => void } {
-  const chunks: string[] = [];
-  const originalWrite = process.stderr.write.bind(process.stderr);
-  const spy = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
-    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
-    return originalWrite(chunk as never, ...(rest as []));
-  }) as typeof process.stderr.write;
-  Object.defineProperty(process.stderr, "write", { configurable: true, value: spy });
-  return {
-    chunks,
-    restore: () => {
-      Object.defineProperty(process.stderr, "write", { configurable: true, value: originalWrite });
-    },
-  };
-}
-
 afterEach(() => {
   capturedPlannedInputs = null;
   capturedHarnessRunOpts = null;
@@ -182,7 +168,7 @@ describe("planned harness loader", () => {
   });
 
   itEffect("rejects duplicate scenario ids across matched files", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-dup-"));
+    const dir = makeTempDir("plans-dup");
     const harnessModulePath = writeHarnessModule(dir);
     writePlanFile(dir, "a.yaml", planYaml(harnessModulePath, { scenarioId: "duplicate-scenario" }));
     writePlanFile(dir, "b.yaml", planYaml(harnessModulePath, { scenarioId: "duplicate-scenario" }));
@@ -201,7 +187,7 @@ describe("planned harness loader", () => {
 
 describe("planned harness compiler + cli ingress", () => {
   itEffect("compiles loaded documents into planned run inputs", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-compile-"));
+    const dir = makeTempDir("plans-compile");
     const harnessModulePath = writeHarnessModule(dir);
     const sourcePath = writePlanFile(dir, "compiled.yaml", planYaml(harnessModulePath));
     const documents = yield* loadPlannedHarnessPath(sourcePath);
@@ -218,10 +204,10 @@ describe("planned harness compiler + cli ingress", () => {
   });
 
   itEffect("runs a planned-harness path through the existing runPlans pipeline", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-run-"));
+    const dir = makeTempDir("plans-run");
     const harnessModulePath = writeHarnessModule(dir);
     const planPath = writePlanFile(dir, "single.yaml", planYaml(harnessModulePath));
-    const resultsDir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-out-"));
+    const resultsDir = makeTempDir("plans-out");
 
     const report = yield* runPlannedHarnessPath(planPath, { resultsDir });
 
@@ -237,10 +223,10 @@ describe("planned harness compiler + cli ingress", () => {
   });
 
   itEffect("forwards totalTimeoutMs into the planned-harness run pipeline", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-timeout-"));
+    const dir = makeTempDir("plans-timeout");
     const harnessModulePath = writeHarnessModule(dir);
     const planPath = writePlanFile(dir, "timeout.yaml", planYaml(harnessModulePath));
-    const resultsDir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-timeout-out-"));
+    const resultsDir = makeTempDir("plans-timeout-out");
 
     yield* runPlannedHarnessPath(planPath, {
       resultsDir,
@@ -251,10 +237,10 @@ describe("planned harness compiler + cli ingress", () => {
   });
 
   itEffect("dispatches `run` through the CLI with explicit harness YAML", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-cli-"));
+    const dir = makeTempDir("plans-cli");
     const harnessModulePath = writeHarnessModule(dir);
     const planPath = writePlanFile(dir, "cli.yaml", planYaml(harnessModulePath));
-    const resultsDir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-cli-out-"));
+    const resultsDir = makeTempDir("plans-cli-out");
 
     const code = yield* main([
       "run",
@@ -275,7 +261,7 @@ describe("planned harness compiler + cli ingress", () => {
   });
 
   itEffect("returns exit 2 when harness export is missing", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-missing-export-"));
+    const dir = makeTempDir("plans-missing-export");
     const harnessModulePath = writeHarnessModule(dir);
     const planPath = writePlanFile(
       dir,
@@ -289,16 +275,184 @@ describe("planned harness compiler + cli ingress", () => {
   });
 
   itEffect("returns exit 2 with a parse error from the harness plan loader", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-invalid-"));
+    const dir = makeTempDir("plans-invalid");
     const badPath = writePlanFile(dir, "broken.yaml", "harness:\n  module: [\n");
-    const { chunks, restore } = installStderrCapture();
+    const stderr = captureStream(process.stderr);
 
     const code = yield* Effect.ensuring(
       main(["run", badPath, "--log-level", "error"]),
-      Effect.sync(restore),
+      Effect.sync(stderr.restore),
     );
 
     expect(code).toBe(EXIT_FATAL);
-    expect(chunks.join("")).toContain("ParseFailure");
+    expect(stderr.chunks.join("")).toContain("ParseFailure");
   });
+
+  // P0-7 regression tests: a misbehaving user harness must NOT crash the
+  // cc-judge process. All three failure modes must produce a typed
+  // PlannedHarnessIngressError (HarnessPlanLoadFailed cause).
+
+  itEffect("compiler maps a synchronous throw from load() to a typed error", function* () {
+    const dir = makeTempDir("plans-load-throw");
+    const harnessModulePath = path.join(dir, "throw-harness.mjs");
+    writeFileSync(
+      harnessModulePath,
+      [
+        "export default {",
+        "  load() {",
+        "    throw new Error('intentional sync throw from load()');",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const planPath = writePlanFile(dir, "throw.yaml", planYaml(harnessModulePath));
+
+    const documents = yield* loadPlannedHarnessPath(planPath);
+    const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT) {
+      expect(result.left.cause._tag).toBe("HarnessPlanLoadFailed");
+      if (result.left.cause._tag === "HarnessPlanLoadFailed") {
+        expect(result.left.cause.message).toContain("threw synchronously");
+        expect(result.left.cause.message).toContain("intentional sync throw");
+      }
+    }
+  });
+
+  itEffect(
+    "compiler maps a non-Effect return value from load() to a typed error",
+    function* () {
+      const dir = makeTempDir("plans-load-nonEffect");
+      const harnessModulePath = path.join(dir, "promise-harness.mjs");
+      writeFileSync(
+        harnessModulePath,
+        [
+          "export default {",
+          "  async load() {",
+          "    return { plan: {}, harness: { name: 'x', run: () => undefined } };",
+          "  },",
+          "};",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const planPath = writePlanFile(dir, "promise.yaml", planYaml(harnessModulePath));
+
+      const documents = yield* loadPlannedHarnessPath(planPath);
+      const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+      expect(result._tag).toBe(EITHER_LEFT);
+      if (result._tag === EITHER_LEFT) {
+        expect(result.left.cause._tag).toBe("HarnessPlanLoadFailed");
+        if (result.left.cause._tag === "HarnessPlanLoadFailed") {
+          expect(result.left.cause.message).toContain("must return an Effect");
+          expect(result.left.cause.message).toContain("Promise");
+        }
+      }
+    },
+  );
+
+  // Three short fixtures that exercise the remaining error-message branches
+  // for non-Effect return values: null, primitive (number), plain object
+  // without a .then. Each kills the corresponding ternary branch in
+  // compiler.ts that produces the "got <X>" suffix.
+
+  itEffect("compiler error names 'null' when load() returns null", function* () {
+    const dir = makeTempDir("plans-load-null");
+    const harnessModulePath = path.join(dir, "null-harness.mjs");
+    writeFileSync(
+      harnessModulePath,
+      ["export default {", "  load() { return null; },", "};", ""].join("\n"),
+      "utf8",
+    );
+    const planPath = writePlanFile(dir, "null.yaml", planYaml(harnessModulePath));
+
+    const documents = yield* loadPlannedHarnessPath(planPath);
+    const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT && result.left.cause._tag === "HarnessPlanLoadFailed") {
+      expect(result.left.cause.message).toContain("got null");
+    }
+  });
+
+  itEffect("compiler error names the typeof when load() returns a primitive", function* () {
+    const dir = makeTempDir("plans-load-num");
+    const harnessModulePath = path.join(dir, "num-harness.mjs");
+    writeFileSync(
+      harnessModulePath,
+      ["export default {", "  load() { return 42; },", "};", ""].join("\n"),
+      "utf8",
+    );
+    const planPath = writePlanFile(dir, "num.yaml", planYaml(harnessModulePath));
+
+    const documents = yield* loadPlannedHarnessPath(planPath);
+    const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+    expect(result._tag).toBe(EITHER_LEFT);
+    if (result._tag === EITHER_LEFT && result.left.cause._tag === "HarnessPlanLoadFailed") {
+      expect(result.left.cause.message).toContain("got number");
+    }
+  });
+
+  itEffect(
+    "compiler error names 'object' when load() returns a plain object without then",
+    function* () {
+      const dir = makeTempDir("plans-load-obj");
+      const harnessModulePath = path.join(dir, "obj-harness.mjs");
+      writeFileSync(
+        harnessModulePath,
+        ["export default {", "  load() { return { foo: 1 }; },", "};", ""].join("\n"),
+        "utf8",
+      );
+      const planPath = writePlanFile(dir, "obj.yaml", planYaml(harnessModulePath));
+
+      const documents = yield* loadPlannedHarnessPath(planPath);
+      const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+      expect(result._tag).toBe(EITHER_LEFT);
+      if (result._tag === EITHER_LEFT && result.left.cause._tag === "HarnessPlanLoadFailed") {
+        expect(result.left.cause.message).toContain("got object");
+      }
+    },
+  );
+
+  itEffect(
+    "compiler maps an uncaught defect inside the load() Effect to a typed error",
+    function* () {
+      const dir = makeTempDir("plans-load-defect");
+      const harnessModulePath = path.join(dir, "defect-harness.mjs");
+      writeFileSync(
+        harnessModulePath,
+        [
+          "import { Effect } from 'effect';",
+          "export default {",
+          "  load() {",
+          "    return Effect.sync(() => {",
+          "      throw new Error('intentional defect inside load() effect');",
+          "    });",
+          "  },",
+          "};",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const planPath = writePlanFile(dir, "defect.yaml", planYaml(harnessModulePath));
+
+      const documents = yield* loadPlannedHarnessPath(planPath);
+      const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
+
+      expect(result._tag).toBe(EITHER_LEFT);
+      if (result._tag === EITHER_LEFT) {
+        expect(result.left.cause._tag).toBe("HarnessPlanLoadFailed");
+        if (result.left.cause._tag === "HarnessPlanLoadFailed") {
+          expect(result.left.cause.message).toContain("uncaught defect");
+          expect(result.left.cause.message).toContain("intentional defect");
+        }
+      }
+    },
+  );
 });

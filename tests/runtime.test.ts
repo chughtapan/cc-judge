@@ -1,79 +1,83 @@
-import { afterEach, describe, expect, vi } from "vitest";
+// Real-process tests for SubprocessRuntime. The DockerRuntime tests that
+// previously lived here were mocked-execSync string-assembly tests — they
+// asserted that we passed the right shell text to a fake docker binary,
+// which doesn't tell us anything about whether real Docker accepts the
+// command. They were deleted alongside a follow-up plan to (1) replace
+// runtime.ts's manual `execSync("docker ...")` driving with dockerode and
+// (2) cover Docker behavior with a real-Docker integration suite under
+// tests/integration/. Until that ships, runtime.ts's Docker paths are
+// covered only by the type system.
+
+import { describe, expect } from "vitest";
 import { Effect } from "effect";
+import { existsSync } from "node:fs";
+import { SubprocessRuntime } from "../src/runner/index.js";
+import { AgentId, ProjectId, ScenarioId } from "../src/core/types.js";
+import { itEffect, expectLeft } from "./support/effect.js";
 
-const { childProcessActual } = vi.hoisted(() => {
-  const { createRequire } = require("node:module") as typeof import("node:module");
-  const req = createRequire(import.meta.url);
-  return {
-    childProcessActual: req("node:child_process") as typeof import("node:child_process"),
-  };
-});
+describe("SubprocessRuntime", () => {
+  itEffect(
+    "rejects with BinaryNotFound when bin path does not exist",
+    function* () {
+      const runtime = new SubprocessRuntime({ bin: "/path/that/definitely/does/not/exist/cc-judge-test" });
+      const agent = {
+        id: AgentId("subproc-missing-bin"),
+        name: "Subproc Missing Bin",
+        artifact: {
+          _tag: "DockerImageArtifact" as const,
+          image: "n/a",
+        },
+        promptInputs: {},
+      };
+      const plan = {
+        project: ProjectId("cc-judge"),
+        scenarioId: ScenarioId("subproc-missing-bin"),
+        name: "subproc-missing-bin",
+        description: "verify BinaryNotFound when bin path missing",
+        agents: [agent] as const,
+        requirements: {
+          expectedBehavior: "fails with BinaryNotFound",
+          validationChecks: ["BinaryNotFound cause"],
+        },
+      };
 
-vi.mock("node:child_process", () => ({
-  ...childProcessActual,
-  execSync: vi.fn(),
-  spawn: vi.fn(),
-}));
+      const result = yield* Effect.either(runtime.prepare(agent, plan));
+      const error = expectLeft(result);
+      expect(error.cause._tag).toBe("BinaryNotFound");
+    },
+  );
 
-const { DockerRuntime } = await import("../src/runner/index.js");
-const { AgentId, ProjectId, ScenarioId } = await import("../src/core/types.js");
-import * as childProcess from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { itEffect } from "./support/effect.js";
+  itEffect(
+    "creates and reaps the workspace tmpdir on a successful prepare/stop cycle",
+    function* () {
+      // /bin/echo is guaranteed to exist on POSIX CI.
+      const runtime = new SubprocessRuntime({ bin: "/bin/echo" });
+      const scenarioPrefix = `subproc-success-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const agent = {
+        id: AgentId("subproc-success"),
+        name: "Subproc Success",
+        artifact: {
+          _tag: "DockerImageArtifact" as const,
+          image: "n/a",
+        },
+        promptInputs: {},
+      };
+      const plan = {
+        project: ProjectId("cc-judge"),
+        scenarioId: ScenarioId(scenarioPrefix),
+        name: "subproc-success",
+        description: "happy path: workspace created and removed",
+        agents: [agent] as const,
+        requirements: {
+          expectedBehavior: "workspace lifecycle clean",
+          validationChecks: ["created then removed"],
+        },
+      };
 
-const execSyncMock = vi.mocked(childProcess.execSync);
-
-afterEach(() => {
-  vi.resetAllMocks();
-});
-
-describe("DockerRuntime", () => {
-  itEffect("resolves dockerfilePath relative to contextPath before docker build", function* () {
-    execSyncMock.mockImplementation((command: string) => {
-      if (command.includes("docker create")) {
-        return Buffer.from("runtime-cid\n");
-      }
-      return Buffer.from("");
-    });
-
-    const repoRoot = mkdtempSync(path.join(os.tmpdir(), "cc-judge-runtime-"));
-    const contextPath = path.join(repoRoot, "agents", "alpha");
-    const relativeDockerfilePath = path.join("docker", "Dockerfile");
-    const absoluteDockerfilePath = path.resolve(contextPath, relativeDockerfilePath);
-
-    mkdirSync(path.join(contextPath, "docker"), { recursive: true });
-    writeFileSync(absoluteDockerfilePath, "FROM alpine:3.19\n", "utf8");
-
-    const runtime = new DockerRuntime();
-    const agent = {
-      id: AgentId("docker-agent"),
-      name: "Docker Agent",
-      artifact: {
-        _tag: "DockerBuildArtifact" as const,
-        contextPath,
-        dockerfilePath: relativeDockerfilePath,
-      },
-      promptInputs: {},
-    };
-    const plan = {
-      project: ProjectId("cc-judge"),
-      scenarioId: ScenarioId("dockerfile-relative"),
-      name: "dockerfile-relative",
-      description: "relative dockerfile path",
-      agents: [agent] as const,
-      requirements: {
-        expectedBehavior: "build from the relative dockerfile",
-        validationChecks: ["docker build uses an absolute Dockerfile path"],
-      },
-    };
-
-    const handle = yield* runtime.prepare(agent, plan);
-    yield* runtime.stop(handle);
-
-    const buildCommand = String(execSyncMock.mock.calls[0]?.[0] ?? "");
-    expect(buildCommand).toContain(`-f ${absoluteDockerfilePath}`);
-    expect(buildCommand).not.toMatch(/(^|\s)-f docker\/Dockerfile(\s|$)/u);
-  });
+      const handle = yield* runtime.prepare(agent, plan);
+      expect(existsSync(handle.workspaceDir)).toBe(true);
+      yield* runtime.stop(handle);
+      expect(existsSync(handle.workspaceDir)).toBe(false);
+    },
+  );
 });

@@ -9,9 +9,11 @@ import { PlannedHarnessIngressError, PlannedHarnessIngressErrorCause } from "./s
 import type {
   CompiledPlannedRun,
   ExternalHarnessModule,
+  HarnessPlanError,
   HarnessPlanLoadArgs,
   LoadedHarnessPlanDocument,
 } from "./types.js";
+import type { PlannedRunInput } from "../app/opts.js";
 
 interface ImportedHarnessModule {
   readonly module: ExternalHarnessModule;
@@ -165,14 +167,7 @@ function compileOneDocument(
         },
         payload: document.document.harness.payload,
       };
-      return imported.module.load(args).pipe(
-        Effect.mapError((error) =>
-          harnessLoadFailed(
-            document.sourcePath,
-            document.document.harness.module,
-            JSON.stringify(error.cause),
-          ),
-        ),
+      return invokeHarnessLoad(imported, args, document).pipe(
         Effect.map((input) => ({
           sourcePath: document.sourcePath,
           input,
@@ -182,11 +177,89 @@ function compileOneDocument(
   );
 }
 
+// Wraps imported.module.load(args) so a misbehaving user harness cannot
+// crash the cc-judge process. Three failure modes are caught and mapped
+// to a typed HarnessPlanLoadFailed error:
+//   1. load() throws synchronously (caught by try/catch).
+//   2. load() returns something other than an Effect (Promise, plain
+//      object, undefined) — caught by the .pipe runtime check.
+//   3. The returned Effect produces an uncaught defect when run —
+//      caught by Effect.catchAllDefect and surfaced as a typed error.
+function invokeHarnessLoad(
+  imported: ImportedHarnessModule,
+  args: HarnessPlanLoadArgs,
+  document: LoadedHarnessPlanDocument,
+): Effect.Effect<PlannedRunInput, PlannedHarnessIngressError, never> {
+  return Effect.suspend(() => {
+    let loadResult: unknown;
+    try {
+      loadResult = imported.module.load(args);
+    } catch (error) {
+      return Effect.fail(
+        harnessLoadFailed(
+          document.sourcePath,
+          document.document.harness.module,
+          `harness load() threw synchronously: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+    }
+    if (
+      loadResult === null ||
+      typeof loadResult !== "object" ||
+      typeof (loadResult as { pipe?: unknown }).pipe !== "function"
+    ) {
+      const got =
+        loadResult !== null &&
+        typeof loadResult === "object" &&
+        typeof (loadResult as { then?: unknown }).then === "function"
+          ? "Promise (did you accidentally mark load() async?)"
+          : loadResult === null
+            ? "null"
+            : typeof loadResult;
+      return Effect.fail(
+        harnessLoadFailed(
+          document.sourcePath,
+          document.document.harness.module,
+          `harness load() must return an Effect; got ${got}`,
+        ),
+      );
+    }
+    const loadEff = loadResult as Effect.Effect<PlannedRunInput, HarnessPlanError, never>;
+    return loadEff.pipe(
+      Effect.mapError((error) =>
+        harnessLoadFailed(
+          document.sourcePath,
+          document.document.harness.module,
+          JSON.stringify(error.cause),
+        ),
+      ),
+      Effect.catchAllDefect((defect) =>
+        Effect.fail(
+          harnessLoadFailed(
+            document.sourcePath,
+            document.document.harness.module,
+            `harness load() effect produced an uncaught defect: ${defect instanceof Error ? defect.message : String(defect)}`,
+          ),
+        ),
+      ),
+    );
+  });
+}
+
 export function compilePlannedHarnessDocuments(
   documents: ReadonlyArray<LoadedHarnessPlanDocument>,
 ): Effect.Effect<ReadonlyArray<CompiledPlannedRun>, PlannedHarnessIngressError, never> {
   const cache = new Map<string, ImportedHarnessModule>();
-  return Effect.forEach(documents, (document) => compileOneDocument(document, cache));
+  // Sequential by design: harness module imports can have top-level
+  // side-effects (timer setup, network handles, global registration). The
+  // per-module cache is populated by the first import; running compile in
+  // parallel would race two importers for the same module before the cache
+  // entry lands and could fire any side-effects twice. Plan compile is
+  // already cheap (file read + import + load()), so the throughput cost of
+  // serialization is negligible.
+  return Effect.forEach(documents, (document) => compileOneDocument(document, cache), {
+    concurrency: 1,
+  });
 }
 
 export function runPlannedHarnessPath(

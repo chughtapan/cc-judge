@@ -1,6 +1,3 @@
-import { mkdtempSync } from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import { describe, expect } from "vitest";
 import { Effect } from "effect";
 import { scoreBundles } from "../src/app/pipeline.js";
@@ -8,6 +5,7 @@ import type { JudgeBackend } from "../src/judge/index.js";
 import type { JudgeResult } from "../src/core/schema.js";
 import { AgentId, ProjectId, RunId, ScenarioId, type JudgmentBundle } from "../src/core/types.js";
 import { itEffect } from "./support/effect.js";
+import { makeTempDir } from "./support/tmpdir.js";
 
 const stubJudge: JudgeBackend = {
   name: "bundle-judge",
@@ -59,7 +57,7 @@ function makeBundle(): JudgmentBundle {
 
 describe("scoreBundles", () => {
   itEffect("scores normalized bundles without a runner", function* () {
-    const resultsDir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-bundle-"));
+    const resultsDir = makeTempDir("bundle");
     const report = yield* scoreBundles([makeBundle()], {
       judge: stubJudge,
       resultsDir,
