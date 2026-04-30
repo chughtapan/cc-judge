@@ -1,6 +1,6 @@
 {
   "name": "@moltzap/cc-judge",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "TypeScript CLI + SDK for planned Claude Code harness runs, LLM bundle judging, and summary.md + results.jsonl reports with Braintrust + Promptfoo telemetry.",
   "type": "module",
   "main": "./dist/index.js",
