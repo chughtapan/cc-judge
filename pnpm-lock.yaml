@@ -27,7 +27,7 @@ importers:
         specifier: 0.0.180
         version: 0.0.180(react@19.2.5)(sswr@2.2.0(svelte@5.55.4(@typescript-eslint/types@8.58.2)))(svelte@5.55.4(@typescript-eslint/types@8.58.2))(vue@3.5.32(typescript@5.6.3))(zod@4.3.6)
       dockerode:
-        specifier: ^5.0.0
+        specifier: 5.0.0
         version: 5.0.0
       effect:
         specifier: 3.21.0
@@ -39,7 +39,7 @@ importers:
         specifier: 4.1.2
         version: 4.1.2
       tar-fs:
-        specifier: ^3.1.2
+        specifier: 3.1.2
         version: 3.1.2
       yaml:
         specifier: 2.6.1
@@ -55,7 +55,7 @@ importers:
         specifier: ^9.6.1
         version: 9.6.1(@stryker-mutator/core@9.6.1(@types/node@22.10.5))(vitest@2.1.9(@types/node@22.10.5))
       '@types/dockerode':
-        specifier: ^4.0.1
+        specifier: 4.0.1
         version: 4.0.1
       '@types/node':
         specifier: 22.10.5
@@ -64,7 +64,7 @@ importers:
         specifier: 4.1.4
         version: 4.1.4
       '@types/tar-fs':
-        specifier: ^2.0.4
+        specifier: 2.0.4
         version: 2.0.4
       '@typescript-eslint/eslint-plugin':
         specifier: 8.19.0
