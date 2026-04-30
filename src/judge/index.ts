@@ -8,7 +8,6 @@ import { Value } from "@sinclair/typebox/value";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AgentRef,
-  AgentTurn,
   Issue,
   IssueSeverity,
   JudgmentBundle,
@@ -23,6 +22,17 @@ import {
   type JudgeResult,
   JudgeResultSchema,
 } from "../core/schema.js";
+import {
+  bundleTurnsToEvents,
+  coerceConfidence,
+  coerceIssues,
+  coerceSeverity,
+  extractJsonText,
+  renderAgents,
+  renderDiff,
+  renderEvents,
+  renderTurns,
+} from "./helpers.js";
 
 export interface JudgeTarget {
   readonly scenarioId: ScenarioId;
@@ -74,56 +84,6 @@ export const JUDGE_SYSTEM_PROMPT = `You are a verdict-only evaluator. Read the e
 }
 Every validation check in the evaluation target is either met or not; list unmet checks as issues. If pass is true, issues may still list minor nits. overallSeverity is null when pass is true and no issues were listed, otherwise the most severe issue. Do not wrap the JSON in markdown fences.`;
 
-function renderDiff(diff: WorkspaceDiff | undefined): string {
-  if (diff === undefined || diff.changed.length === 0) return "(no workspace changes)";
-  const lines: string[] = [];
-  for (const c of diff.changed) {
-    if (c.before === null && c.after !== null) {
-      lines.push(`+ added ${c.path} (${c.after.length} bytes)`);
-    } else if (c.before !== null && c.after === null) {
-      lines.push(`- removed ${c.path}`);
-    } else {
-      lines.push(`~ modified ${c.path}`);
-    }
-  }
-  return lines.join("\n");
-}
-
-function renderTurns(turns: ReadonlyArray<Turn>): string {
-  const parts: string[] = [];
-  for (const t of turns) {
-    parts.push(`--- Turn ${t.index} ---`);
-    parts.push(`USER: ${t.prompt}`);
-    parts.push(`ASSISTANT: ${t.response}`);
-  }
-  return parts.join("\n");
-}
-
-function renderEvents(events: ReadonlyArray<TraceEvent>): string {
-  const parts: string[] = [];
-  for (const e of events) {
-    switch (e.type) {
-      case "message":
-        parts.push(`[${new Date(e.ts).toISOString()}] [${e.channel}] ${e.from}${e.to ? ` -> ${e.to}` : ""}: ${e.text}`);
-        break;
-      case "phase":
-        parts.push(`[${new Date(e.ts).toISOString()}] PHASE: ${e.phase}${e.round !== undefined ? ` (round ${e.round})` : ""}`);
-        break;
-      case "action":
-        parts.push(`[${new Date(e.ts).toISOString()}] [${e.channel}] ${e.agent} ACTION: ${e.action}`);
-        break;
-      case "state":
-        parts.push(`[${new Date(e.ts).toISOString()}] STATE: ${JSON.stringify(e.snapshot)}`);
-        break;
-    }
-  }
-  return parts.join("\n");
-}
-
-function renderAgents(agents: ReadonlyArray<AgentRef>): string {
-  return agents.map((a) => `- ${a.name} (${a.id})${a.role ? ` role=${a.role}` : ""}`).join("\n");
-}
-
 function bundleToJudgeTarget(bundle: JudgmentBundle): JudgeTarget {
   return {
     scenarioId: bundle.scenarioId,
@@ -135,50 +95,6 @@ function bundleToJudgeTarget(bundle: JudgmentBundle): JudgeTarget {
 
 function bundleTurnsToTurns(bundle: JudgmentBundle): ReadonlyArray<Turn> {
   return bundle.turns?.map((entry) => entry.turn) ?? [];
-}
-
-function bundleTurnsToEvents(bundle: JudgmentBundle): ReadonlyArray<TraceEvent> | undefined {
-  if (bundle.events !== undefined && bundle.events.length > 0) {
-    return bundle.events;
-  }
-  if (bundle.turns === undefined || bundle.turns.length === 0) {
-    return undefined;
-  }
-  const agentNameById = new Map(bundle.agents.map((agent) => [agent.id, agent.name]));
-  const events: TraceEvent[] = [];
-  for (const entry of bundle.turns) {
-    events.push(...turnEntryToEvents(entry, agentNameById));
-  }
-  return events;
-}
-
-function turnEntryToEvents(
-  entry: AgentTurn,
-  agentNameById: ReadonlyMap<string, string>,
-): ReadonlyArray<TraceEvent> {
-  const promptTs = Date.parse(entry.turn.startedAt);
-  const safePromptTs = Number.isFinite(promptTs) ? promptTs : Date.now();
-  const agentId = entry.agentId;
-  const agentName = agentId !== undefined
-    ? (agentNameById.get(agentId) ?? agentId)
-    : "assistant";
-  return [
-    {
-      type: "message",
-      from: "user",
-      to: agentName,
-      channel: "prompt",
-      text: entry.turn.prompt,
-      ts: safePromptTs,
-    },
-    {
-      type: "message",
-      from: agentName,
-      channel: "response",
-      text: entry.turn.response,
-      ts: safePromptTs + entry.turn.latencyMs,
-    },
-  ];
 }
 
 export function bundleToJudgeInput(bundle: JudgmentBundle, abortSignal?: AbortSignal): JudgeInput {
@@ -237,15 +153,6 @@ function renderPrompt(input: JudgeInput): string {
 
   sections.push("", "Return the JSON verdict now.");
   return sections.join("\n");
-}
-
-function extractJsonText(text: string): string {
-  // The prompt says no markdown fences, but models slip. Strip a leading
-  // ```json / ``` fence pair if present. Never tries to repair the JSON body.
-  const trimmed = text.trim();
-  const fenceStart = /^```(?:json)?\s*/u;
-  const fenceEnd = /\s*```\s*$/u;
-  return trimmed.replace(fenceStart, "").replace(fenceEnd, "").trim();
 }
 
 interface RawJudgeVerdict {
@@ -447,32 +354,6 @@ function buildResult(
     ...(decoded.judgeConfidence !== undefined ? { judgeConfidence: decoded.judgeConfidence } : {}),
   };
   return Effect.succeed(result);
-}
-
-function coerceIssues(v: unknown): ReadonlyArray<Issue> {
-  if (!Array.isArray(v)) return [];
-  const out: Issue[] = [];
-  for (const entry of v) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const e: { issue?: unknown; severity?: unknown } = entry;
-    if (typeof e.issue !== "string") continue;
-    const severity = coerceSeverity(e.severity);
-    if (severity === null) continue;
-    out.push({ issue: e.issue, severity });
-  }
-  return out;
-}
-
-function coerceSeverity(v: unknown): IssueSeverity | null {
-  if (v === "minor" || v === "significant" || v === "critical") return v;
-  return null;
-}
-
-function coerceConfidence(v: unknown): number | undefined {
-  if (typeof v !== "number" || Number.isNaN(v)) return undefined;
-  if (v < 0) return 0;
-  if (v > 1) return 1;
-  return v;
 }
 
 function sleepEff(ms: number): Effect.Effect<void, never, never> {
