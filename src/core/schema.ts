@@ -200,25 +200,6 @@ export const JudgmentBundleSchema = Type.Object({
   metadata: Type.Optional(UnknownRecordSchema),
 });
 
-export const JudgeResultSchema = Type.Object({
-  pass: Type.Boolean(),
-  reason: Type.String(),
-  issues: Type.Array(IssueSchema),
-  overallSeverity: Type.Union([IssueSeveritySchema, Type.Null()]),
-  judgeConfidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
-  retryCount: Type.Integer({ minimum: 0 }),
-});
-
-export interface JudgeResult {
-  readonly pass: boolean;
-  readonly reason: string;
-  readonly issues: ReadonlyArray<Issue>;
-  readonly overallSeverity: IssueSeverity | null;
-  readonly judgeConfidence?: number;
-  readonly retryCount: number;
-  readonly failureKind?: JudgeFailureKind;
-}
-
 export type JudgeFailureKind =
   | "SdkFailed"
   | "NoOutput"
@@ -235,6 +216,35 @@ export const JUDGE_FAILURE_KIND = {
   Timeout: "Timeout",
   ResultError: "ResultError",
 } as const satisfies { readonly [K in JudgeFailureKind]: K };
+
+export const JudgeFailureKindSchema = Type.Union([
+  Type.Literal(JUDGE_FAILURE_KIND.SdkFailed),
+  Type.Literal(JUDGE_FAILURE_KIND.NoOutput),
+  Type.Literal(JUDGE_FAILURE_KIND.MalformedJson),
+  Type.Literal(JUDGE_FAILURE_KIND.SchemaInvalid),
+  Type.Literal(JUDGE_FAILURE_KIND.Timeout),
+  Type.Literal(JUDGE_FAILURE_KIND.ResultError),
+]);
+
+export const JudgeResultSchema = Type.Object({
+  pass: Type.Boolean(),
+  reason: Type.String(),
+  issues: Type.Array(IssueSchema),
+  overallSeverity: Type.Union([IssueSeveritySchema, Type.Null()]),
+  judgeConfidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+  retryCount: Type.Integer({ minimum: 0 }),
+  failureKind: Type.Optional(JudgeFailureKindSchema),
+});
+
+export interface JudgeResult {
+  readonly pass: boolean;
+  readonly reason: string;
+  readonly issues: ReadonlyArray<Issue>;
+  readonly overallSeverity: IssueSeverity | null;
+  readonly judgeConfidence?: number;
+  readonly retryCount: number;
+  readonly failureKind?: JudgeFailureKind;
+}
 
 export const RunRecordSchema = Type.Object({
   source: RunSourceSchema,
@@ -261,6 +271,7 @@ export const RunRecordSchema = Type.Object({
     added: Type.Integer({ minimum: 0 }),
     removed: Type.Integer({ minimum: 0 }),
   }),
+  failureKind: Type.Optional(Type.Union([JudgeFailureKindSchema, Type.Null()])),
 });
 
 export interface RunRecord {
@@ -284,6 +295,7 @@ export interface RunRecord {
   readonly cacheWriteTokens: number;
   readonly transcriptPath: string;
   readonly workspaceDiffSummary: { readonly changed: number; readonly added: number; readonly removed: number };
+  readonly failureKind?: JudgeFailureKind | null;
 }
 
 export const ReportSummarySchema = Type.Object({

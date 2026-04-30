@@ -175,6 +175,7 @@ function buildBundleRecord(params: {
     cacheWriteTokens: agg.cacheWriteTokens,
     transcriptPath: "",
     workspaceDiffSummary: summary,
+    ...(params.judge.failureKind !== undefined ? { failureKind: params.judge.failureKind } : {}),
   };
 }
 
