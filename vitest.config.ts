@@ -8,8 +8,6 @@ export default defineConfig({
     poolOptions: {
       forks: { singleFork: true },
     },
-    // Integration tests require external services (Docker daemon) and
-    // run via `pnpm test:integration` against vitest.config.integration.ts.
-    exclude: ["tests/e2e/**/*.test.ts", "tests/integration/**/*.test.ts"],
+    exclude: ["tests/e2e/**/*.test.ts"],
   },
 });

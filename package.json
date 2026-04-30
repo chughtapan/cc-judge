@@ -38,7 +38,6 @@
     "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts'",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:integration": "vitest run --config vitest.config.integration.ts",
     "mutation": "stryker run",
     "prepublishOnly": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },

@@ -1,17 +1,20 @@
-// Integration tests for DockerRuntime — exercise the actual Docker
-// daemon via dockerode. Skipped automatically on machines without a
-// reachable Docker socket (CI without Docker, dev box with Desktop
-// stopped) so the file is safe to keep in the always-run integration
-// suite.
+// Tests for DockerRuntime that exercise the actual Docker daemon via
+// dockerode. Lives in the regular test suite (not split out as
+// "integration") so Stryker mutation testing sees these assertions —
+// without that, every Docker code path in src/runner/runtime.ts would
+// show as no-coverage.
 //
-// Coverage targets:
+// Skipped automatically on machines without a reachable Docker socket
+// (CI without Docker, dev box with Desktop stopped) via a sync
+// `docker version --format` probe at module load. `pnpm test` is safe
+// to run anywhere; the suite either passes or skips, never errors.
+//
+// Coverage:
 // - DockerImageArtifact pull-policy semantics (always, if-missing, never)
 // - DockerBuildArtifact end-to-end (tar context → image → container)
 // - Container lifecycle: prepare creates a container; stop kills + removes it
 // - Auto-tagged image cleanup on build failure (P0-2 contract)
 // - User-supplied imageTag preserved on build failure
-// - Workspace bind-mount survives prepare and is reaped on stop
-// - SubprocessRuntime end-to-end with a real binary
 
 import { afterAll, beforeAll, describe, expect } from "vitest";
 import { Data, Effect } from "effect";
@@ -20,15 +23,15 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DockerRuntime, type RuntimeHandle } from "../../src/runner/index.js";
+import { DockerRuntime, type RuntimeHandle } from "../src/runner/index.js";
 import {
   AgentId,
   ProjectId,
   ScenarioId,
   type AgentDeclaration,
   type RunPlan,
-} from "../../src/core/types.js";
-import { itEffect, expectLeft, EITHER_LEFT } from "../support/effect.js";
+} from "../src/core/types.js";
+import { itEffect, expectLeft, EITHER_LEFT } from "./support/effect.js";
 
 // Tagged error for upstream Promise wrappers used in this test file —
 // keeps the Effect channel typed (no generic Error in the lint-checked
