@@ -4,6 +4,29 @@ All notable changes to cc-judge will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.0.3] - 2026-04-29
+
+### Added
+
+- Typed cause-tag constant maps exported from every module that owns a tagged-error union (`BUNDLE_BUILD_CAUSE`, `BUNDLE_DECODE_CAUSE`, `HARNESS_EXECUTION_CAUSE`, `PUBLISH_ERROR_CAUSE`, `RUN_COORDINATION_CAUSE`, `RUNNER_RESOLUTION_CAUSE`, `TRACE_DECODE_CAUSE`, `INSPECT_CAUSE`, `JUDGE_PREFLIGHT_TAG`, `JUDGE_FAILURE_KIND`, `HARNESS_PLAN_CAUSE`, `PLANNED_HARNESS_INGRESS_CAUSE`). Each is `as const satisfies` constrained against its union so a renamed tag breaks compilation.
+- `INSPECT_SOURCE`, `TRACE_EVENT_TYPE`, `WAL_WARN_EVENT`, `UNSTRINGIFIABLE_PAYLOAD` / `UNSTRINGIFIABLE_ERROR` exported from their respective modules for structural test assertions.
+- Prompt-fragment constants exported from `src/judge/helpers.ts` (`DIFF_PREFIX`, `PROMPT_NO_DIFF`, `TURN_LABEL`, `turnHeader`, `EVENT_PREFIX`, `DEFAULT_AGENT_NAME`) and `src/judge/index.ts` (`PROMPT_HEADING`).
+- `JudgeFailureKind` type + schema + optional `failureKind` on `JudgeResult` and `RunRecord`. `criticalFallback` populates it; `buildBundleRecord` propagates it; the Braintrust observer forwards it as run metadata so production observability sees the structural failure mode (Timeout / NoOutput / MalformedJson / etc.) instead of having to grep `reason` text.
+- `DETERMINISTIC_JUDGE_MODEL` constant exported from `src/app/pipeline.ts`.
+- `formatInspectReport` (pure renderer over `InspectReport`) + `inspectRunAndPrint` (CLI wrapper). Tests assert on the structured report; the CLI does the IO via the wrapper.
+- `JudgePreflightResult` tagged enum + `formatJudgePreflightMessage` formatter. CLI invokes both; tests assert on tag instead of substring-matching error messages.
+
+### Changed
+
+- **BREAKING:** `inspectRun(runId, resultsDir)` now returns `Effect<InspectReport, InspectError>` instead of `Effect<void, InspectError>`. SDK consumers calling it for stdout/stderr side effects must switch to `inspectRunAndPrint(runId, resultsDir)`. The CLI is already updated.
+- **BREAKING:** `ensureJudgeReady(judgeBackend)` now returns `JudgePreflightResult` (tagged enum) instead of `string | null`. SDK consumers wanting the old human-readable string can pipe through `formatJudgePreflightMessage`.
+- `walWarn` signature tightened: accepts `WalWarnEvent` (typed enum) instead of arbitrary `string`. All 14 internal call sites converted to use `WAL_WARN_EVENT.*` constants.
+
+### Fixed
+
+- 199 previously-suppressed `agent-code-guard/no-hardcoded-assertion-literals` ESLint warnings across 21 test files. Tests now import typed constants and assert on structural fields (cause tags, `failureKind`, `JudgePreflightResult` tag, `InspectReport` shape) rather than substring-matching internal user-facing message strings.
+- `DETERMINISTIC_JUDGE_MODEL` is now declared above its first use in `src/app/pipeline.ts` (was referenced before the `export const` line, a temporal-dead-zone foot-gun for any future top-level call).
+
 ## [0.0.2] - 2026-04-29
 
 ### Added
