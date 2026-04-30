@@ -1,3 +1,4 @@
+import { Data } from "effect";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
@@ -106,14 +107,31 @@ function writeAnthropicAuthCache(nowMs: number): void {
   renameSync(tempPath, cachePath);
 }
 
-export function ensureJudgeReady(judgeBackend: string): string | null {
+// Typed preflight outcome. CLI formats it for stderr; tests assert on the tag.
+
+export type JudgePreflightResult =
+  | { readonly _tag: "Ready" }
+  | { readonly _tag: "PreflightFailed"; readonly detail: string }
+  | { readonly _tag: "AuthMissing" }
+  | { readonly _tag: "InvalidJson"; readonly detail: string };
+
+export const JudgePreflightResult = Data.taggedEnum<JudgePreflightResult>();
+
+export const JUDGE_PREFLIGHT_TAG = {
+  Ready: "Ready",
+  PreflightFailed: "PreflightFailed",
+  AuthMissing: "AuthMissing",
+  InvalidJson: "InvalidJson",
+} as const satisfies { readonly [K in JudgePreflightResult["_tag"]]: K };
+
+export function ensureJudgeReady(judgeBackend: string): JudgePreflightResult {
   if (!shouldPreflightClaudeAuth(judgeBackend)) {
-    return null;
+    return JudgePreflightResult.Ready();
   }
 
   const nowMs = Date.now();
   if (readAnthropicAuthCache(nowMs)) {
-    return null;
+    return JudgePreflightResult.Ready();
   }
 
   const result = spawnSync("claude", ["auth", "status"], {
@@ -122,13 +140,10 @@ export function ensureJudgeReady(judgeBackend: string): string | null {
   });
 
   if (result.error !== undefined) {
-    return `claude auth preflight failed: ${result.error.message}`;
+    return JudgePreflightResult.PreflightFailed({ detail: result.error.message });
   }
   if (result.status !== 0) {
-    const stderr = result.stderr.trim();
-    return stderr.length > 0
-      ? `claude auth preflight failed: ${stderr}`
-      : "claude auth preflight failed";
+    return JudgePreflightResult.PreflightFailed({ detail: result.stderr.trim() });
   }
 
   try {
@@ -139,14 +154,31 @@ export function ensureJudgeReady(judgeBackend: string): string | null {
       !("loggedIn" in parsed) ||
       parsed.loggedIn !== true
     ) {
-      return "claude auth missing: run `claude auth login` or set ANTHROPIC_API_KEY";
+      return JudgePreflightResult.AuthMissing();
     }
     writeAnthropicAuthCache(nowMs);
-    return null;
+    return JudgePreflightResult.Ready();
   } catch (error) {
-    return error instanceof Error
-      ? `claude auth preflight returned invalid JSON: ${error.message}`
-      : "claude auth preflight returned invalid JSON";
+    return JudgePreflightResult.InvalidJson({
+      detail: error instanceof Error ? error.message : "",
+    });
+  }
+}
+
+export function formatJudgePreflightMessage(result: JudgePreflightResult): string | null {
+  switch (result._tag) {
+    case "Ready":
+      return null;
+    case "PreflightFailed":
+      return result.detail.length > 0
+        ? `claude auth preflight failed: ${result.detail}`
+        : "claude auth preflight failed";
+    case "AuthMissing":
+      return "claude auth missing: run `claude auth login` or set ANTHROPIC_API_KEY";
+    case "InvalidJson":
+      return result.detail.length > 0
+        ? `claude auth preflight returned invalid JSON: ${result.detail}`
+        : "claude auth preflight returned invalid JSON";
   }
 }
 

@@ -12,7 +12,7 @@ import {
   bundleYamlCodec,
   type BundleCodec,
 } from "../src/emit/bundle-codec.js";
-import { BundleDecodeError } from "../src/core/errors.js";
+import { BUNDLE_DECODE_CAUSE, BundleDecodeError } from "../src/core/errors.js";
 import { PbtAssertionError } from "./support/errors.js";
 import {
   AGENT_LIFECYCLE_STATUS,
@@ -26,7 +26,7 @@ import {
   type AgentTurn,
   type JudgmentBundle,
 } from "../src/core/types.js";
-import { itEffect, expectLeft } from "./support/effect.js";
+import { itEffect, expectLeft, expectCauseTag } from "./support/effect.js";
 
 const PROPERTY_RUNS = 50;
 
@@ -230,8 +230,9 @@ describe("bundleAutoCodec dispatch (example-based, mutation killer)", () => {
   // the YAML branch and the leading-whitespace edge case.
 
   itEffect("auto: dispatches to YAML when input does not start with { or [", function* () {
+    const runId = "yaml-dispatch";
     const yaml = [
-      "runId: yaml-dispatch",
+      `runId: ${runId}`,
       "project: cc-judge",
       "scenarioId: scn",
       "name: y",
@@ -249,12 +250,13 @@ describe("bundleAutoCodec dispatch (example-based, mutation killer)", () => {
     ].join("\n");
 
     const bundle = yield* bundleAutoCodec.decode(yaml, "mem://yaml");
-    expect(bundle.runId).toBe("yaml-dispatch");
+    expect(bundle.runId).toBe(runId);
   });
 
   itEffect("auto: trims leading whitespace before dispatch decision", function* () {
+    const runId = "ws-dispatch";
     const json = "   \n\t  " + JSON.stringify({
-      runId: "ws-dispatch",
+      runId,
       project: "cc-judge",
       scenarioId: "scn",
       name: "j",
@@ -265,7 +267,7 @@ describe("bundleAutoCodec dispatch (example-based, mutation killer)", () => {
     });
 
     const bundle = yield* bundleAutoCodec.decode(json, "mem://ws");
-    expect(bundle.runId).toBe("ws-dispatch");
+    expect(bundle.runId).toBe(runId);
   });
 
   itEffect("auto: dispatches to JSON when input starts with [", function* () {
@@ -274,11 +276,10 @@ describe("bundleAutoCodec dispatch (example-based, mutation killer)", () => {
     // schema validator (with the input path threaded through) proves
     // JSON.parse succeeded.
     const arrayJson = "[1, 2, 3]";
-    const result = yield* Effect.either(bundleAutoCodec.decode(arrayJson, "mem://arr"));
+    const sourcePath = "mem://arr";
+    const result = yield* Effect.either(bundleAutoCodec.decode(arrayJson, sourcePath));
     const error = expectLeft(result);
-    expect(error.cause._tag).toBe("SchemaInvalid");
-    if (error.cause._tag === "SchemaInvalid") {
-      expect(error.cause.path).toBe("mem://arr");
-    }
+    const cause = expectCauseTag(error.cause, BUNDLE_DECODE_CAUSE.SchemaInvalid);
+    expect(cause.path).toBe(sourcePath);
   });
 });

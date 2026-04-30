@@ -12,6 +12,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 import {
+  JUDGE_PREFLIGHT_TAG,
   clearJudgePreflightDiskCacheForTests,
   ensureJudgeReady,
   resetJudgePreflightCacheForTests,
@@ -19,8 +20,6 @@ import {
 import { captureEnvVar, deleteEnvVar, restoreEnvVar, setEnvVar } from "./support/env.js";
 
 // Disk cache lives at <xdgCacheHome>/cc-judge/anthropic-auth-success.json.
-// `installXdgCacheHome` in beforeEach captures the per-test path so tests
-// can read/seed the cache file without touching process.env at runtime.
 let currentXdgCacheHome: string | null = null;
 
 function installXdgCacheHome(): string {
@@ -59,7 +58,7 @@ describe("judge preflight cache", () => {
   it("skips preflight entirely when ANTHROPIC_API_KEY is set", () => {
     setEnvVar("ANTHROPIC_API_KEY", "test-key");
 
-    expect(ensureJudgeReady("anthropic")).toBeNull();
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
@@ -71,8 +70,8 @@ describe("judge preflight cache", () => {
       error: undefined,
     });
 
-    expect(ensureJudgeReady("anthropic")).toBeNull();
-    expect(ensureJudgeReady("anthropic")).toBeNull();
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });
 
@@ -84,13 +83,11 @@ describe("judge preflight cache", () => {
       error: undefined,
     });
 
-    expect(ensureJudgeReady("anthropic")).toBeNull();
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
 
-    // No in-memory cache survives a disk cache clear: the next call
-    // must hit `claude auth status` again.
     clearJudgePreflightDiskCacheForTests();
-    expect(ensureJudgeReady("anthropic")).toBeNull();
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
     expect(spawnSyncMock).toHaveBeenCalledTimes(2);
   });
 
@@ -102,13 +99,13 @@ describe("judge preflight cache", () => {
       error: undefined,
     });
 
-    expect(ensureJudgeReady("anthropic")).toContain("claude auth preflight failed");
-    expect(ensureJudgeReady("anthropic")).toContain("claude auth preflight failed");
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.PreflightFailed);
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.PreflightFailed);
     expect(spawnSyncMock).toHaveBeenCalledTimes(2);
   });
 
   it("skips anthropic auth preflight for non-anthropic backends", () => {
-    expect(ensureJudgeReady("openai")).toBeNull();
+    expect(ensureJudgeReady("openai")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
@@ -121,16 +118,14 @@ describe("judge preflight cache", () => {
       stderr: "",
       error: undefined,
     });
-    // Pre-stage a corrupt cache file.
     const cachePath = cacheFilePath();
     mkdirSync(path.dirname(cachePath), { recursive: true });
     writeFileSync(cachePath, "not json {{{", "utf8");
 
-    expect(ensureJudgeReady("anthropic")).toBeNull();
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
-    // Cache was rewritten with a valid record.
     const rewritten = JSON.parse(readFileSync(cachePath, "utf8")) as { checkedAtMs?: unknown };
-    expect(typeof rewritten.checkedAtMs).toBe("number");
+    expect(Number.isFinite(rewritten.checkedAtMs)).toBe(true);
   });
 
   it("re-runs preflight when cached checkedAtMs is non-numeric", () => {
@@ -144,7 +139,7 @@ describe("judge preflight cache", () => {
     mkdirSync(path.dirname(cachePath), { recursive: true });
     writeFileSync(cachePath, JSON.stringify({ checkedAtMs: "yesterday" }), "utf8");
 
-    expect(ensureJudgeReady("anthropic")).toBeNull();
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });
 
@@ -157,13 +152,11 @@ describe("judge preflight cache", () => {
     });
     const cachePath = cacheFilePath();
     mkdirSync(path.dirname(cachePath), { recursive: true });
-    // Pin the timestamp to two days ago so the TTL boundary is unambiguous.
     const expiredCheckedAt = Date.now() - 2 * TWENTY_FOUR_HOURS_MS;
     writeFileSync(cachePath, JSON.stringify({ checkedAtMs: expiredCheckedAt }), "utf8");
 
-    expect(ensureJudgeReady("anthropic")).toBeNull();
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
-    // Cache was overwritten — no longer expired.
     const rewritten = JSON.parse(readFileSync(cachePath, "utf8")) as { checkedAtMs: number };
     expect(rewritten.checkedAtMs).toBeGreaterThan(expiredCheckedAt);
   });
@@ -179,7 +172,7 @@ describe("judge preflight cache", () => {
     mkdirSync(path.dirname(cachePath), { recursive: true });
     writeFileSync(cachePath, JSON.stringify({ wrong: "shape" }), "utf8");
 
-    expect(ensureJudgeReady("anthropic")).toBeNull();
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });
 
@@ -194,11 +187,11 @@ describe("judge preflight cache", () => {
     mkdirSync(path.dirname(cachePath), { recursive: true });
     writeFileSync(cachePath, JSON.stringify(null), "utf8");
 
-    expect(ensureJudgeReady("anthropic")).toBeNull();
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });
 
-  it("re-runs preflight when checkedAtMs is Infinity (non-finite)", () => {
+  it("re-runs preflight when checkedAtMs is null (non-finite)", () => {
     spawnSyncMock.mockReturnValue({
       status: 0,
       stdout: JSON.stringify({ loggedIn: true }),
@@ -207,48 +200,48 @@ describe("judge preflight cache", () => {
     });
     const cachePath = cacheFilePath();
     mkdirSync(path.dirname(cachePath), { recursive: true });
-    // JSON.stringify converts Infinity to null, so write a hand-crafted
-    // body that JSON.parse will return Infinity for is impossible. Use NaN
-    // path: write `{"checkedAtMs":null}` which fails the typeof check via
-    // `parsed.checkedAtMs` being null, not number.
     writeFileSync(cachePath, '{"checkedAtMs":null}', "utf8");
 
-    expect(ensureJudgeReady("anthropic")).toBeNull();
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });
 
   // ── claude binary failure modes ───────────────────────────────────────────
 
-  it("surfaces an ENOENT-like result.error from spawnSync as 'preflight failed'", () => {
+  it("surfaces an ENOENT-like result.error from spawnSync as PreflightFailed", () => {
+    const errorMessage = "spawn claude ENOENT";
     spawnSyncMock.mockReturnValue({
       status: null,
       stdout: "",
       stderr: "",
-      error: new Error("spawn claude ENOENT"),
+      error: new Error(errorMessage),
     });
 
     const result = ensureJudgeReady("anthropic");
-    expect(result).toContain("claude auth preflight failed");
-    expect(result).toContain("ENOENT");
-    // Failed preflight does NOT write a success cache.
+    expect(result._tag).toBe(JUDGE_PREFLIGHT_TAG.PreflightFailed);
+    if (result._tag === JUDGE_PREFLIGHT_TAG.PreflightFailed) {
+      expect(result.detail).toBe(errorMessage);
+    }
     expect(existsSync(cacheFilePath())).toBe(false);
   });
 
   it("returns the trimmed stderr when claude exits non-zero with a message", () => {
+    const stderrMessage = "not logged in";
     spawnSyncMock.mockReturnValue({
       status: 1,
       stdout: "",
-      stderr: "  not logged in  \n",
+      stderr: `  ${stderrMessage}  \n`,
       error: undefined,
     });
 
     const result = ensureJudgeReady("anthropic");
-    expect(result).toContain("not logged in");
-    // Surrounding whitespace was trimmed out of the message.
-    expect(result).not.toMatch(/\s\snot logged in/u);
+    expect(result._tag).toBe(JUDGE_PREFLIGHT_TAG.PreflightFailed);
+    if (result._tag === JUDGE_PREFLIGHT_TAG.PreflightFailed) {
+      expect(result.detail).toBe(stderrMessage);
+    }
   });
 
-  it("returns a generic 'preflight failed' when stderr is empty on non-zero exit", () => {
+  it("returns PreflightFailed with empty detail when stderr is empty on non-zero exit", () => {
     spawnSyncMock.mockReturnValue({
       status: 2,
       stdout: "",
@@ -256,10 +249,14 @@ describe("judge preflight cache", () => {
       error: undefined,
     });
 
-    expect(ensureJudgeReady("anthropic")).toBe("claude auth preflight failed");
+    const result = ensureJudgeReady("anthropic");
+    expect(result._tag).toBe(JUDGE_PREFLIGHT_TAG.PreflightFailed);
+    if (result._tag === JUDGE_PREFLIGHT_TAG.PreflightFailed) {
+      expect(result.detail).toBe("");
+    }
   });
 
-  it("treats malformed JSON stdout as an invalid-JSON preflight failure", () => {
+  it("treats malformed JSON stdout as an InvalidJson preflight failure", () => {
     spawnSyncMock.mockReturnValue({
       status: 0,
       stdout: "this is not json",
@@ -268,11 +265,11 @@ describe("judge preflight cache", () => {
     });
 
     const result = ensureJudgeReady("anthropic");
-    expect(result).toContain("invalid JSON");
+    expect(result._tag).toBe(JUDGE_PREFLIGHT_TAG.InvalidJson);
     expect(existsSync(cacheFilePath())).toBe(false);
   });
 
-  it("treats loggedIn=false as the 'auth missing' message and does not cache", () => {
+  it("treats loggedIn=false as AuthMissing and does not cache", () => {
     spawnSyncMock.mockReturnValue({
       status: 0,
       stdout: JSON.stringify({ loggedIn: false }),
@@ -280,14 +277,11 @@ describe("judge preflight cache", () => {
       error: undefined,
     });
 
-    const result = ensureJudgeReady("anthropic");
-    expect(result).toContain("claude auth missing");
-    expect(result).toContain("claude auth login");
-    expect(result).toContain("ANTHROPIC_API_KEY");
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.AuthMissing);
     expect(existsSync(cacheFilePath())).toBe(false);
   });
 
-  it("treats stdout without a loggedIn key as 'auth missing'", () => {
+  it("treats stdout without a loggedIn key as AuthMissing", () => {
     spawnSyncMock.mockReturnValue({
       status: 0,
       stdout: JSON.stringify({ otherField: 1 }),
@@ -295,7 +289,7 @@ describe("judge preflight cache", () => {
       error: undefined,
     });
 
-    expect(ensureJudgeReady("anthropic")).toContain("claude auth missing");
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.AuthMissing);
     expect(existsSync(cacheFilePath())).toBe(false);
   });
 
@@ -309,12 +303,10 @@ describe("judge preflight cache", () => {
       error: undefined,
     });
 
-    expect(ensureJudgeReady("anthropic")).toBeNull();
+    expect(ensureJudgeReady("anthropic")._tag).toBe(JUDGE_PREFLIGHT_TAG.Ready);
 
     const cachePath = cacheFilePath();
     expect(existsSync(cachePath)).toBe(true);
-    // The atomic write uses ${cachePath}.${pid}.tmp; no such file should
-    // remain after a successful renameSync.
     const tmpPath = `${cachePath}.${process.pid}.tmp`;
     expect(existsSync(tmpPath)).toBe(false);
   });

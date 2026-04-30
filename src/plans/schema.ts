@@ -84,6 +84,20 @@ export type PlannedHarnessIngressErrorCause =
 export const PlannedHarnessIngressErrorCause =
   Data.taggedEnum<PlannedHarnessIngressErrorCause>();
 
+export const PLANNED_HARNESS_INGRESS_CAUSE = {
+  TopLevelNotDocument: "TopLevelNotDocument",
+  SchemaInvalid: "SchemaInvalid",
+  FileNotFound: "FileNotFound",
+  GlobNoMatches: "GlobNoMatches",
+  ParseFailure: "ParseFailure",
+  DuplicateScenarioId: "DuplicateScenarioId",
+  ModuleResolveFailed: "ModuleResolveFailed",
+  ModuleImportFailed: "ModuleImportFailed",
+  ModuleExportMissing: "ModuleExportMissing",
+  InvalidHarnessModule: "InvalidHarnessModule",
+  HarnessPlanLoadFailed: "HarnessPlanLoadFailed",
+} as const satisfies { readonly [K in PlannedHarnessIngressErrorCause["_tag"]]: K };
+
 const HarnessModuleSpecSchema = Type.Object({
   module: Type.String({ minLength: 1 }),
   export: Type.Optional(Type.String({ minLength: 1 })),

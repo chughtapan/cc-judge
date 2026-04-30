@@ -216,7 +216,25 @@ export interface JudgeResult {
   readonly overallSeverity: IssueSeverity | null;
   readonly judgeConfidence?: number;
   readonly retryCount: number;
+  readonly failureKind?: JudgeFailureKind;
 }
+
+export type JudgeFailureKind =
+  | "SdkFailed"
+  | "NoOutput"
+  | "MalformedJson"
+  | "SchemaInvalid"
+  | "Timeout"
+  | "ResultError";
+
+export const JUDGE_FAILURE_KIND = {
+  SdkFailed: "SdkFailed",
+  NoOutput: "NoOutput",
+  MalformedJson: "MalformedJson",
+  SchemaInvalid: "SchemaInvalid",
+  Timeout: "Timeout",
+  ResultError: "ResultError",
+} as const satisfies { readonly [K in JudgeFailureKind]: K };
 
 export const RunRecordSchema = Type.Object({
   source: RunSourceSchema,

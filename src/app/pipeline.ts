@@ -375,11 +375,15 @@ function coordinationFailureRecordInput(
   return {
     bundle: coordinationFailureBundle(plan, error, outcomes),
     judge,
-    judgeModel: "deterministic/coordinator",
+    judgeModel: DETERMINISTIC_JUDGE_MODEL,
     startedAt,
     latencyMs,
   };
 }
+
+// Synthetic judge label used when the coordinator failed before the real
+// judge could observe the run. Tests assert on this constant.
+export const DETERMINISTIC_JUDGE_MODEL = "deterministic/coordinator";
 
 function coordinationFailureBundle(
   plan: RunPlan,

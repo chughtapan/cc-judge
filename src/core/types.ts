@@ -123,6 +123,13 @@ export type TraceEvent =
   | { readonly type: "action"; readonly agent: string; readonly action: string; readonly channel: string; readonly ts: number }
   | { readonly type: "state"; readonly snapshot: Readonly<Record<string, unknown>>; readonly ts: number };
 
+export const TRACE_EVENT_TYPE = {
+  Message: "message",
+  Phase: "phase",
+  Action: "action",
+  State: "state",
+} as const satisfies { readonly [K in Capitalize<TraceEvent["type"]>]: Uncapitalize<K> };
+
 export interface Phase {
   readonly id: string;
   readonly name: string;

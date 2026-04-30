@@ -21,12 +21,15 @@ const stubJudge: JudgeBackend = {
   },
 };
 
+const BUNDLE_NAME = "bundle";
+const BUNDLE_MODEL_NAME = "bundle-model";
+
 function makeBundle(): JudgmentBundle {
   return {
     runId: RunId("bundle-run-1"),
     project: ProjectId("cc-judge"),
     scenarioId: ScenarioId("bundle-scenario"),
-    name: "bundle",
+    name: BUNDLE_NAME,
     description: "normalized bundle",
     requirements: {
       expectedBehavior: "judge the bundle",
@@ -50,7 +53,7 @@ function makeBundle(): JudgmentBundle {
       },
     ],
     metadata: {
-      modelName: "bundle-model",
+      modelName: BUNDLE_MODEL_NAME,
     },
   };
 }
@@ -65,7 +68,7 @@ describe("scoreBundles", () => {
 
     expect(report.summary.total).toBe(1);
     expect(report.summary.passed).toBe(1);
-    expect(report.runs[0]?.source).toBe("bundle");
-    expect(report.runs[0]?.modelName).toBe("bundle-model");
+    expect(report.runs[0]?.source).toBe(BUNDLE_NAME);
+    expect(report.runs[0]?.modelName).toBe(BUNDLE_MODEL_NAME);
   });
 });

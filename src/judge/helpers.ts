@@ -23,37 +23,58 @@ import {
 
 // ── workspace diff ──────────────────────────────────────────────────────────
 
-const NO_DIFF_PLACEHOLDER = "(no workspace changes)";
+export const PROMPT_NO_DIFF = "(no workspace changes)";
+export const DIFF_PREFIX = {
+  Added: "+ added",
+  Removed: "- removed",
+  Modified: "~ modified",
+} as const;
 
 function renderChange(c: WorkspaceFileChange): string {
   if (c.before === null && c.after !== null) {
-    return `+ added ${c.path} (${c.after.length} bytes)`;
+    return `${DIFF_PREFIX.Added} ${c.path} (${c.after.length} bytes)`;
   }
   if (c.before !== null && c.after === null) {
-    return `- removed ${c.path}`;
+    return `${DIFF_PREFIX.Removed} ${c.path}`;
   }
-  return `~ modified ${c.path}`;
+  return `${DIFF_PREFIX.Modified} ${c.path}`;
 }
 
 export function renderDiff(diff: WorkspaceDiff | undefined): string {
   const changes = diff?.changed ?? [];
-  if (changes.length === 0) return NO_DIFF_PLACEHOLDER;
+  if (changes.length === 0) return PROMPT_NO_DIFF;
   return changes.map(renderChange).join("\n");
 }
 
 // ── turns ───────────────────────────────────────────────────────────────────
 
+export const TURN_LABEL = {
+  User: "USER",
+  Assistant: "ASSISTANT",
+} as const;
+
+export function turnHeader(index: number): string {
+  return `--- Turn ${index} ---`;
+}
+
 export function renderTurns(turns: ReadonlyArray<Turn>): string {
   return turns
     .flatMap((t) => [
-      `--- Turn ${t.index} ---`,
-      `USER: ${t.prompt}`,
-      `ASSISTANT: ${t.response}`,
+      turnHeader(t.index),
+      `${TURN_LABEL.User}: ${t.prompt}`,
+      `${TURN_LABEL.Assistant}: ${t.response}`,
     ])
     .join("\n");
 }
 
 // ── events ──────────────────────────────────────────────────────────────────
+
+export const EVENT_PREFIX = {
+  Phase: "PHASE:",
+  Action: "ACTION:",
+  State: "STATE:",
+  MessageArrow: " -> ",
+} as const;
 
 function isoTs(ts: number): string {
   return new Date(ts).toISOString();
@@ -63,17 +84,17 @@ function renderEvent(e: TraceEvent): string {
   const ts = isoTs(e.ts);
   switch (e.type) {
     case "message": {
-      const target = e.to !== undefined ? ` -> ${e.to}` : "";
+      const target = e.to !== undefined ? `${EVENT_PREFIX.MessageArrow}${e.to}` : "";
       return `[${ts}] [${e.channel}] ${e.from}${target}: ${e.text}`;
     }
     case "phase": {
       const round = e.round !== undefined ? ` (round ${e.round})` : "";
-      return `[${ts}] PHASE: ${e.phase}${round}`;
+      return `[${ts}] ${EVENT_PREFIX.Phase} ${e.phase}${round}`;
     }
     case "action":
-      return `[${ts}] [${e.channel}] ${e.agent} ACTION: ${e.action}`;
+      return `[${ts}] [${e.channel}] ${e.agent} ${EVENT_PREFIX.Action} ${e.action}`;
     case "state":
-      return `[${ts}] STATE: ${JSON.stringify(e.snapshot)}`;
+      return `[${ts}] ${EVENT_PREFIX.State} ${JSON.stringify(e.snapshot)}`;
   }
 }
 
@@ -94,10 +115,10 @@ export function renderAgents(agents: ReadonlyArray<AgentRef>): string {
 
 // ── bundle → events ─────────────────────────────────────────────────────────
 
-const DEFAULT_AGENT_NAME = "assistant";
-const PROMPT_CHANNEL = "prompt";
-const RESPONSE_CHANNEL = "response";
-const USER_FROM = "user";
+export const DEFAULT_AGENT_NAME = "assistant";
+export const PROMPT_CHANNEL = "prompt";
+export const RESPONSE_CHANNEL = "response";
+export const USER_FROM = "user";
 
 function safeTimestamp(iso: string): number {
   const parsed = Date.parse(iso);

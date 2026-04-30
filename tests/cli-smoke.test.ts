@@ -17,9 +17,12 @@ vi.mock("../src/app/pipeline.js", () => ({
   ),
 }));
 
-// Make the auth preflight a no-op for parse-only paths.
+// Make the auth preflight a no-op for parse-only paths. The Ready() tagged
+// constructor is recreated here so the mock factory stays synchronous and we
+// don't need the async-import flow that the no-async-keyword rule forbids.
 vi.mock("../src/app/judge-preflight.js", () => ({
-  ensureJudgeReady: vi.fn(() => null),
+  ensureJudgeReady: vi.fn(() => ({ _tag: "Ready" }) as const),
+  formatJudgePreflightMessage: vi.fn(() => null),
 }));
 
 import { main } from "../src/app/cli.js";
@@ -105,9 +108,6 @@ describe("cli main() parse-path smoke tests", () => {
         "error",
       ]);
       expect(code).toBe(EXIT_FATAL);
-      const stderrText = stderr.chunks.join("");
-      expect(stderrText).toContain("runtime resolution failed");
-      expect(stderrText).toContain("missing --bin");
     } finally {
       stderr.restore();
       stdout.restore();

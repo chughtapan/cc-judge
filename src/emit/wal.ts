@@ -59,6 +59,26 @@ export type WalLineKind = (typeof WAL_LINE_KIND)[keyof typeof WAL_LINE_KIND];
 // this string; callers inspecting logs key on it.
 export const WAL_WARN_SOURCE = "cc-judge:wal";
 
+// Structured warning event tags emitted by walWarn(). Tests assert on
+// these; production observers may key on them.
+export const WAL_WARN_EVENT = {
+  MkdirFailed: "mkdir.failed",
+  PrecreateFailed: "precreate.failed",
+  LockFailed: "lock.failed",
+  AppendFailed: "append.failed",
+  AppendAfterClose: "append.after-close",
+  OutcomeAppendFailed: "outcome.append.failed",
+  FsyncFailed: "fsync.failed",
+  UnlockFailed: "unlock.failed",
+  RenameFailed: "rename.failed",
+  SweepReaddirFailed: "sweep.readdir.failed",
+  SweepCheckFailed: "sweep.check.failed",
+  SweepMarkOrphanedFailed: "sweep.mark-orphaned.failed",
+  SweepRenameFailed: "sweep.rename.failed",
+  SweepScanFailed: "sweep.scan.failed",
+} as const;
+export type WalWarnEvent = (typeof WAL_WARN_EVENT)[keyof typeof WAL_WARN_EVENT];
+
 // `close()` status channel. The WAL records this on the terminal
 // outcome line; it is not read by anything else in this release.
 export const RUN_CLOSE_STATUS = {
@@ -175,20 +195,23 @@ export const PAYLOAD_PREVIEW_MAX_CHARS = 200;
  * Exported for direct property-based testing.
  * @internal
  */
+export const UNSTRINGIFIABLE_PAYLOAD = "<unstringifiable>";
+export const UNSTRINGIFIABLE_ERROR = "<unstringifiable error>";
+
 export function previewPayload(payload: unknown): string {
   try {
     const serialized = JSON.stringify(payload);
-    if (serialized === undefined) return "<unstringifiable>";
+    if (serialized === undefined) return UNSTRINGIFIABLE_PAYLOAD;
     return serialized.length > PAYLOAD_PREVIEW_MAX_CHARS
       ? `${serialized.slice(0, PAYLOAD_PREVIEW_MAX_CHARS)}…`
       : serialized;
   } catch (err) {
     void err;
-    return "<unstringifiable>";
+    return UNSTRINGIFIABLE_PAYLOAD;
   }
 }
 
-function walWarn(event: string, detail: Readonly<Record<string, unknown>>): void {
+function walWarn(event: WalWarnEvent, detail: Readonly<Record<string, unknown>>): void {
   // Single-line JSON for log-aggregator compatibility. `process.stderr`
   // not `console.warn` so test harnesses that capture `console.*` don't
   // drown in expected warnings.
@@ -270,7 +293,7 @@ export function openRunLog(
       try {
         ensureDirsSync(paths);
       } catch (err) {
-        walWarn("mkdir.failed", {
+        walWarn(WAL_WARN_EVENT.MkdirFailed, {
           runId,
           inflightDir: paths.inflightDir,
           runsDir: paths.runsDir,
@@ -284,7 +307,7 @@ export function openRunLog(
       try {
         fs.writeFileSync(file, "", { flag: "a" });
       } catch (err) {
-        walWarn("precreate.failed", { runId, file, error: errorToString(err) });
+        walWarn(WAL_WARN_EVENT.PrecreateFailed, { runId, file, error: errorToString(err) });
       }
 
       try {
@@ -296,7 +319,7 @@ export function openRunLog(
         // file with best-effort seq. The recovery-sweep contract keys on
         // the LOCK being held, not on our in-memory state, so lock
         // collision here is diagnostic, not fatal.
-        walWarn("lock.failed", { runId, file, error: errorToString(err) });
+        walWarn(WAL_WARN_EVENT.LockFailed, { runId, file, error: errorToString(err) });
       }
 
       return makeHandle(runId, paths, state);
@@ -340,7 +363,7 @@ function makeHandle(
         // monitoring the WAL_WARN_SOURCE channel can identify exactly which
         // event went missing. A caller that races its own close against an
         // emit will see the warning in stderr; the verdict is unaffected.
-        walWarn("append.after-close", {
+        walWarn(WAL_WARN_EVENT.AppendAfterClose, {
           runId,
           kind: input.kind,
           attemptedAt: Date.now(),
@@ -360,7 +383,7 @@ function makeHandle(
         writeLineSync(file, line);
         state.seq += 1;
       } catch (err) {
-        walWarn("append.failed", {
+        walWarn(WAL_WARN_EVENT.AppendFailed, {
           runId,
           kind: input.kind,
           seq: state.seq,
@@ -401,7 +424,7 @@ function makeHandle(
           writeLineSync(file, outcomeLine);
           state.seq += 1;
         } catch (err) {
-          walWarn("outcome.append.failed", {
+          walWarn(WAL_WARN_EVENT.OutcomeAppendFailed, {
             runId,
             error: errorToString(err),
           });
@@ -410,7 +433,7 @@ function makeHandle(
         try {
           fsyncFile(file);
         } catch (err) {
-          walWarn("fsync.failed", { runId, file, error: errorToString(err) });
+          walWarn(WAL_WARN_EVENT.FsyncFailed, { runId, file, error: errorToString(err) });
         }
 
         // Release the lock BEFORE the rename. proper-lockfile's
@@ -421,7 +444,7 @@ function makeHandle(
             lockfile.unlockSync(file, { realpath: false });
             state.locked = false;
           } catch (err) {
-            walWarn("unlock.failed", { runId, file, error: errorToString(err) });
+            walWarn(WAL_WARN_EVENT.UnlockFailed, { runId, file, error: errorToString(err) });
           }
         }
 
@@ -429,7 +452,7 @@ function makeHandle(
         try {
           fs.renameSync(file, dest);
         } catch (err) {
-          walWarn("rename.failed", {
+          walWarn(WAL_WARN_EVENT.RenameFailed, {
             runId,
             from: file,
             to: dest,
@@ -471,7 +494,7 @@ export function recoverySweep(
       entries = fs.readdirSync(paths.inflightDir);
     } catch (err) {
       if (!isEnoent(err)) {
-        walWarn("sweep.readdir.failed", {
+        walWarn(WAL_WARN_EVENT.SweepReaddirFailed, {
           inflightDir: paths.inflightDir,
           error: errorToString(err),
         });
@@ -512,7 +535,7 @@ function sweepOneFile(
       };
     }
   } catch (err) {
-    walWarn("sweep.check.failed", {
+    walWarn(WAL_WARN_EVENT.SweepCheckFailed, {
       runId,
       file: inflightPath,
       error: errorToString(err),
@@ -541,7 +564,7 @@ function sweepOneFile(
       };
       writeLineSync(inflightPath, marker);
     } catch (err) {
-      walWarn("sweep.mark-orphaned.failed", {
+      walWarn(WAL_WARN_EVENT.SweepMarkOrphanedFailed, {
         runId,
         file: inflightPath,
         error: errorToString(err),
@@ -561,7 +584,7 @@ function sweepOneFile(
     fs.mkdirSync(paths.runsDir, { recursive: true });
     fs.renameSync(inflightPath, dest);
   } catch (err) {
-    walWarn("sweep.rename.failed", {
+    walWarn(WAL_WARN_EVENT.SweepRenameFailed, {
       runId,
       from: inflightPath,
       to: dest,
@@ -603,7 +626,7 @@ function scanFileForOutcome(file: string): boolean {
     }
     return false;
   } catch (err) {
-    walWarn("sweep.scan.failed", { file, error: errorToString(err) });
+    walWarn(WAL_WARN_EVENT.SweepScanFailed, { file, error: errorToString(err) });
     return false;
   }
 }
@@ -622,7 +645,7 @@ export function isOutcomeLine(value: unknown): boolean {
 /** @internal — exported for direct property-based testing. */
 export function errorToString(err: unknown): string {
   if (err instanceof Error) return err.message;
-  try { return String(err); } catch (inner) { void inner; return "<unstringifiable error>"; }
+  try { return String(err); } catch (inner) { void inner; return UNSTRINGIFIABLE_ERROR; }
 }
 
 /** @internal — exported for direct property-based testing. */

@@ -12,8 +12,8 @@ import { BraintrustEmitter, PromptfooEmitter, type ObservabilityEmitter } from "
 import { AnthropicJudgeBackend } from "../judge/index.js";
 import { SubprocessRuntime, type AgentRuntime } from "../runner/index.js";
 import { runPlannedHarnessPath } from "../plans/compiler.js";
-import { ensureJudgeReady } from "./judge-preflight.js";
-import { inspectRun, type InspectErrorCause } from "./inspect.js";
+import { ensureJudgeReady, formatJudgePreflightMessage } from "./judge-preflight.js";
+import { inspectRunAndPrint, type InspectErrorCause } from "./inspect.js";
 
 export type CliExitCode = 0 | 1 | 2;
 
@@ -175,9 +175,9 @@ function runHandler(args: RunArgs): Effect.Effect<void, never, never> {
       return;
     }
 
-    const preflightFailure = ensureJudgeReady(args.judgeBackend);
-    if (preflightFailure !== null) {
-      process.stderr.write(`cc-judge: ${preflightFailure}\n`);
+    const preflightMessage = formatJudgePreflightMessage(ensureJudgeReady(args.judgeBackend));
+    if (preflightMessage !== null) {
+      process.stderr.write(`cc-judge: ${preflightMessage}\n`);
       setExitCode(2);
       return;
     }
@@ -244,7 +244,7 @@ interface InspectArgs {
 }
 
 function inspectHandler(args: InspectArgs): Effect.Effect<void, never, never> {
-  return inspectRun(args.runId, args.results).pipe(
+  return inspectRunAndPrint(args.runId, args.results).pipe(
     Effect.tap(() => Effect.sync(() => setExitCode(0))),
     Effect.catchTag("InspectError", (error) =>
       Effect.sync(() => {

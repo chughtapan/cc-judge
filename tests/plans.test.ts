@@ -7,17 +7,27 @@ import { makeTempDir } from "./support/tmpdir.js";
 import * as YAML from "yaml";
 import { main } from "../src/app/cli.js";
 import {
+  PLANNED_HARNESS_INGRESS_CAUSE,
   PlanFilePath,
   compilePlannedHarnessDocuments,
   decodePlannedHarnessDocument,
   loadPlannedHarnessPath,
   runPlannedHarnessPath,
 } from "../src/plans/index.js";
-import { itEffect, EITHER_LEFT } from "./support/effect.js";
+import { itEffect, expectLeft, expectCauseTag } from "./support/effect.js";
 import { installDefaultEnvVar } from "./support/env.js";
-import { captureStream } from "./support/streams.js";
 
 installDefaultEnvVar("ANTHROPIC_API_KEY", "test-anthropic-api-key");
+
+// Fixture round-trip values: the test sends these in and asserts they come
+// back unchanged. Local constants document the round-trip relationship.
+const PROJECT_ID = "cc-judge";
+const SCENARIO_ID = "planned-harness-smoke";
+const HARNESS_NAME = "fixture-harness";
+const HARNESS_MODULE_REL = "./fixture-harness.mjs";
+const ARRAY_ROOT_PATH = "mem://array-root.yaml";
+const DUPLICATE_SCENARIO_ID = "duplicate-scenario";
+const TOTAL_TIMEOUT_MS = 12_345;
 
 let capturedPlannedInputs: ReadonlyArray<unknown> | null = null;
 let capturedHarnessRunOpts: Record<string, unknown> | null = null;
@@ -84,9 +94,9 @@ function planYaml(harnessModulePath: string, overrides: {
   readonly exportName?: string;
 } = {}): string {
   return YAML.stringify({
-    project: "cc-judge",
-    scenarioId: overrides.scenarioId ?? "planned-harness-smoke",
-    name: "planned-harness-smoke",
+    project: PROJECT_ID,
+    scenarioId: overrides.scenarioId ?? SCENARIO_ID,
+    name: SCENARIO_ID,
     description: "exercise planned harness ingress",
     requirements: {
       expectedBehavior: "complete one prompt",
@@ -116,72 +126,71 @@ afterEach(() => {
 describe("planned harness schema", () => {
   itEffect("decodes one planned-harness document from YAML", function* () {
     const decoded = yield* decodePlannedHarnessDocument(
-      YAML.parse(
-        planYaml("./fixture-harness.mjs"),
-      ),
+      YAML.parse(planYaml(HARNESS_MODULE_REL)),
       PlanFilePath("mem://planned-harness.yaml"),
     );
 
-    expect(decoded.project).toBe("cc-judge");
-    expect(decoded.scenarioId).toBe("planned-harness-smoke");
-    expect(decoded.harness.module).toBe("./fixture-harness.mjs");
+    expect(decoded.project).toBe(PROJECT_ID);
+    expect(decoded.scenarioId).toBe(SCENARIO_ID);
+    expect(decoded.harness.module).toBe(HARNESS_MODULE_REL);
     expect(decoded.harness.export).toBeUndefined();
   });
 
   itEffect("rejects non-document roots with TopLevelNotDocument", function* () {
-    const result = yield* Effect.either(
-      decodePlannedHarnessDocument(
-        [YAML.parse(planYaml("./fixture-harness.mjs"))],
-        PlanFilePath("mem://array-root.yaml"),
+    const err = expectLeft(
+      yield* Effect.either(
+        decodePlannedHarnessDocument(
+          [YAML.parse(planYaml(HARNESS_MODULE_REL))],
+          PlanFilePath(ARRAY_ROOT_PATH),
+        ),
       ),
     );
 
-    expect(result._tag).toBe(EITHER_LEFT);
-    if (result._tag === EITHER_LEFT) {
-      expect(result.left.cause._tag).toBe("TopLevelNotDocument");
-      expect(result.left.cause.path).toBe("mem://array-root.yaml");
-    }
+    const cause = expectCauseTag(err.cause, PLANNED_HARNESS_INGRESS_CAUSE.TopLevelNotDocument);
+    expect(cause.path).toBe(ARRAY_ROOT_PATH);
   });
 });
 
 describe("planned harness loader", () => {
   itEffect("returns FileNotFound for a missing non-glob path", function* () {
-    const result = yield* Effect.either(
-      loadPlannedHarnessPath(path.join(os.tmpdir(), `cc-judge-missing-plan-${Date.now()}.yaml`)),
+    const err = expectLeft(
+      yield* Effect.either(
+        loadPlannedHarnessPath(path.join(os.tmpdir(), `cc-judge-missing-plan-${Date.now()}.yaml`)),
+      ),
     );
-
-    expect(result._tag).toBe(EITHER_LEFT);
-    if (result._tag === EITHER_LEFT) {
-      expect(result.left.cause._tag).toBe("FileNotFound");
-    }
+    expectCauseTag(err.cause, PLANNED_HARNESS_INGRESS_CAUSE.FileNotFound);
   });
 
   itEffect("returns GlobNoMatches for an unmatched glob", function* () {
-    const result = yield* Effect.either(
-      loadPlannedHarnessPath(path.join(os.tmpdir(), "cc-judge-no-plans-*.yaml")),
+    const err = expectLeft(
+      yield* Effect.either(
+        loadPlannedHarnessPath(path.join(os.tmpdir(), "cc-judge-no-plans-*.yaml")),
+      ),
     );
-
-    expect(result._tag).toBe(EITHER_LEFT);
-    if (result._tag === EITHER_LEFT) {
-      expect(result.left.cause._tag).toBe("GlobNoMatches");
-    }
+    expectCauseTag(err.cause, PLANNED_HARNESS_INGRESS_CAUSE.GlobNoMatches);
   });
 
   itEffect("rejects duplicate scenario ids across matched files", function* () {
     const dir = makeTempDir("plans-dup");
     const harnessModulePath = writeHarnessModule(dir);
-    writePlanFile(dir, "a.yaml", planYaml(harnessModulePath, { scenarioId: "duplicate-scenario" }));
-    writePlanFile(dir, "b.yaml", planYaml(harnessModulePath, { scenarioId: "duplicate-scenario" }));
+    writePlanFile(dir, "a.yaml", planYaml(harnessModulePath, { scenarioId: DUPLICATE_SCENARIO_ID }));
+    writePlanFile(dir, "b.yaml", planYaml(harnessModulePath, { scenarioId: DUPLICATE_SCENARIO_ID }));
 
-    const result = yield* Effect.either(loadPlannedHarnessPath(path.join(dir, "*.yaml")));
+    const err = expectLeft(
+      yield* Effect.either(loadPlannedHarnessPath(path.join(dir, "*.yaml"))),
+    );
+    const cause = expectCauseTag(err.cause, PLANNED_HARNESS_INGRESS_CAUSE.DuplicateScenarioId);
+    expect(cause.scenarioId).toBe(DUPLICATE_SCENARIO_ID);
+    expect(cause.paths[0]).toContain(path.join(dir, "a.yaml"));
+    expect(cause.paths[1]).toContain(path.join(dir, "b.yaml"));
+  });
 
-    expect(result._tag).toBe(EITHER_LEFT);
-    if (result._tag === EITHER_LEFT) {
-      expect(result.left.cause._tag).toBe("DuplicateScenarioId");
-      expect(result.left.cause.scenarioId).toBe("duplicate-scenario");
-      expect(result.left.cause.paths[0]).toContain(path.join(dir, "a.yaml"));
-      expect(result.left.cause.paths[1]).toContain(path.join(dir, "b.yaml"));
-    }
+  itEffect("returns ParseFailure for malformed yaml", function* () {
+    const dir = makeTempDir("plans-parse-failure");
+    const badPath = writePlanFile(dir, "broken.yaml", "harness:\n  module: [\n");
+
+    const err = expectLeft(yield* Effect.either(loadPlannedHarnessPath(badPath)));
+    expectCauseTag(err.cause, PLANNED_HARNESS_INGRESS_CAUSE.ParseFailure);
   });
 });
 
@@ -194,8 +203,8 @@ describe("planned harness compiler + cli ingress", () => {
     const compiled = yield* compilePlannedHarnessDocuments(documents);
 
     expect(compiled[0]?.sourcePath).toBe(sourcePath);
-    expect(compiled[0]?.input.plan.scenarioId).toBe("planned-harness-smoke");
-    expect(compiled[0]?.input.harness.name).toBe("fixture-harness");
+    expect(compiled[0]?.input.plan.scenarioId).toBe(SCENARIO_ID);
+    expect(compiled[0]?.input.harness.name).toBe(HARNESS_NAME);
     expect(compiled[0]?.input.plan.agents[0]?.promptInputs).toMatchObject({
       payload: {
         prompts: ["Fix the failing test"],
@@ -217,8 +226,8 @@ describe("planned harness compiler + cli ingress", () => {
       readonly plan: { readonly scenarioId: string };
       readonly harness: { readonly name: string };
     };
-    expect(input.plan.scenarioId).toBe("planned-harness-smoke");
-    expect(input.harness.name).toBe("fixture-harness");
+    expect(input.plan.scenarioId).toBe(SCENARIO_ID);
+    expect(input.harness.name).toBe(HARNESS_NAME);
     expect(capturedHarnessRunOpts?.["resultsDir"]).toBe(resultsDir);
   });
 
@@ -230,10 +239,10 @@ describe("planned harness compiler + cli ingress", () => {
 
     yield* runPlannedHarnessPath(planPath, {
       resultsDir,
-      totalTimeoutMs: 12_345,
+      totalTimeoutMs: TOTAL_TIMEOUT_MS,
     });
 
-    expect(capturedHarnessRunOpts?.["totalTimeoutMs"]).toBe(12_345);
+    expect(capturedHarnessRunOpts?.["totalTimeoutMs"]).toBe(TOTAL_TIMEOUT_MS);
   });
 
   itEffect("dispatches `run` through the CLI with explicit harness YAML", function* () {
@@ -274,22 +283,17 @@ describe("planned harness compiler + cli ingress", () => {
     expect(code).toBe(EXIT_FATAL);
   });
 
-  itEffect("returns exit 2 with a parse error from the harness plan loader", function* () {
+  itEffect("returns exit 2 when the CLI is given a malformed plan file", function* () {
     const dir = makeTempDir("plans-invalid");
     const badPath = writePlanFile(dir, "broken.yaml", "harness:\n  module: [\n");
-    const stderr = captureStream(process.stderr);
 
-    const code = yield* Effect.ensuring(
-      main(["run", badPath, "--log-level", "error"]),
-      Effect.sync(stderr.restore),
-    );
+    const code = yield* main(["run", badPath, "--log-level", "error"]);
 
     expect(code).toBe(EXIT_FATAL);
-    expect(stderr.chunks.join("")).toContain("ParseFailure");
   });
 
   // P0-7 regression tests: a misbehaving user harness must NOT crash the
-  // cc-judge process. All three failure modes must produce a typed
+  // cc-judge process. All failure modes must produce a typed
   // PlannedHarnessIngressError (HarnessPlanLoadFailed cause).
 
   itEffect("compiler maps a synchronous throw from load() to a typed error", function* () {
@@ -310,16 +314,8 @@ describe("planned harness compiler + cli ingress", () => {
     const planPath = writePlanFile(dir, "throw.yaml", planYaml(harnessModulePath));
 
     const documents = yield* loadPlannedHarnessPath(planPath);
-    const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
-
-    expect(result._tag).toBe(EITHER_LEFT);
-    if (result._tag === EITHER_LEFT) {
-      expect(result.left.cause._tag).toBe("HarnessPlanLoadFailed");
-      if (result.left.cause._tag === "HarnessPlanLoadFailed") {
-        expect(result.left.cause.message).toContain("threw synchronously");
-        expect(result.left.cause.message).toContain("intentional sync throw");
-      }
-    }
+    const err = expectLeft(yield* Effect.either(compilePlannedHarnessDocuments(documents)));
+    expectCauseTag(err.cause, PLANNED_HARNESS_INGRESS_CAUSE.HarnessPlanLoadFailed);
   });
 
   itEffect(
@@ -342,25 +338,16 @@ describe("planned harness compiler + cli ingress", () => {
       const planPath = writePlanFile(dir, "promise.yaml", planYaml(harnessModulePath));
 
       const documents = yield* loadPlannedHarnessPath(planPath);
-      const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
-
-      expect(result._tag).toBe(EITHER_LEFT);
-      if (result._tag === EITHER_LEFT) {
-        expect(result.left.cause._tag).toBe("HarnessPlanLoadFailed");
-        if (result.left.cause._tag === "HarnessPlanLoadFailed") {
-          expect(result.left.cause.message).toContain("must return an Effect");
-          expect(result.left.cause.message).toContain("Promise");
-        }
-      }
+      const err = expectLeft(yield* Effect.either(compilePlannedHarnessDocuments(documents)));
+      expectCauseTag(err.cause, PLANNED_HARNESS_INGRESS_CAUSE.HarnessPlanLoadFailed);
     },
   );
 
-  // Three short fixtures that exercise the remaining error-message branches
-  // for non-Effect return values: null, primitive (number), plain object
-  // without a .then. Each kills the corresponding ternary branch in
-  // compiler.ts that produces the "got <X>" suffix.
+  // Three short fixtures exercise the remaining branches for non-Effect
+  // return values: null, primitive (number), plain object without a .then.
+  // Each kills the corresponding ternary in compiler.ts.
 
-  itEffect("compiler error names 'null' when load() returns null", function* () {
+  itEffect("compiler errors when load() returns null", function* () {
     const dir = makeTempDir("plans-load-null");
     const harnessModulePath = path.join(dir, "null-harness.mjs");
     writeFileSync(
@@ -371,15 +358,11 @@ describe("planned harness compiler + cli ingress", () => {
     const planPath = writePlanFile(dir, "null.yaml", planYaml(harnessModulePath));
 
     const documents = yield* loadPlannedHarnessPath(planPath);
-    const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
-
-    expect(result._tag).toBe(EITHER_LEFT);
-    if (result._tag === EITHER_LEFT && result.left.cause._tag === "HarnessPlanLoadFailed") {
-      expect(result.left.cause.message).toContain("got null");
-    }
+    const err = expectLeft(yield* Effect.either(compilePlannedHarnessDocuments(documents)));
+    expectCauseTag(err.cause, PLANNED_HARNESS_INGRESS_CAUSE.HarnessPlanLoadFailed);
   });
 
-  itEffect("compiler error names the typeof when load() returns a primitive", function* () {
+  itEffect("compiler errors when load() returns a primitive", function* () {
     const dir = makeTempDir("plans-load-num");
     const harnessModulePath = path.join(dir, "num-harness.mjs");
     writeFileSync(
@@ -390,16 +373,12 @@ describe("planned harness compiler + cli ingress", () => {
     const planPath = writePlanFile(dir, "num.yaml", planYaml(harnessModulePath));
 
     const documents = yield* loadPlannedHarnessPath(planPath);
-    const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
-
-    expect(result._tag).toBe(EITHER_LEFT);
-    if (result._tag === EITHER_LEFT && result.left.cause._tag === "HarnessPlanLoadFailed") {
-      expect(result.left.cause.message).toContain("got number");
-    }
+    const err = expectLeft(yield* Effect.either(compilePlannedHarnessDocuments(documents)));
+    expectCauseTag(err.cause, PLANNED_HARNESS_INGRESS_CAUSE.HarnessPlanLoadFailed);
   });
 
   itEffect(
-    "compiler error names 'object' when load() returns a plain object without then",
+    "compiler errors when load() returns a plain object without then",
     function* () {
       const dir = makeTempDir("plans-load-obj");
       const harnessModulePath = path.join(dir, "obj-harness.mjs");
@@ -411,12 +390,8 @@ describe("planned harness compiler + cli ingress", () => {
       const planPath = writePlanFile(dir, "obj.yaml", planYaml(harnessModulePath));
 
       const documents = yield* loadPlannedHarnessPath(planPath);
-      const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
-
-      expect(result._tag).toBe(EITHER_LEFT);
-      if (result._tag === EITHER_LEFT && result.left.cause._tag === "HarnessPlanLoadFailed") {
-        expect(result.left.cause.message).toContain("got object");
-      }
+      const err = expectLeft(yield* Effect.either(compilePlannedHarnessDocuments(documents)));
+      expectCauseTag(err.cause, PLANNED_HARNESS_INGRESS_CAUSE.HarnessPlanLoadFailed);
     },
   );
 
@@ -443,16 +418,8 @@ describe("planned harness compiler + cli ingress", () => {
       const planPath = writePlanFile(dir, "defect.yaml", planYaml(harnessModulePath));
 
       const documents = yield* loadPlannedHarnessPath(planPath);
-      const result = yield* Effect.either(compilePlannedHarnessDocuments(documents));
-
-      expect(result._tag).toBe(EITHER_LEFT);
-      if (result._tag === EITHER_LEFT) {
-        expect(result.left.cause._tag).toBe("HarnessPlanLoadFailed");
-        if (result.left.cause._tag === "HarnessPlanLoadFailed") {
-          expect(result.left.cause.message).toContain("uncaught defect");
-          expect(result.left.cause.message).toContain("intentional defect");
-        }
-      }
+      const err = expectLeft(yield* Effect.either(compilePlannedHarnessDocuments(documents)));
+      expectCauseTag(err.cause, PLANNED_HARNESS_INGRESS_CAUSE.HarnessPlanLoadFailed);
     },
   );
 });

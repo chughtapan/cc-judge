@@ -21,11 +21,14 @@ import {
   RUN_CLOSE_STATUS,
   WAL_LINE_KIND,
   WAL_LINE_VERSION,
+  WAL_WARN_EVENT,
+  WAL_WARN_SOURCE,
   openRunLog,
   recoverySweep,
   walPathsFromResultsDir,
   type WalLine,
 } from "../src/emit/wal.js";
+import { Exit } from "effect";
 import { RunId } from "../src/core/types.js";
 import { itEffect } from "./support/effect.js";
 import { captureStream } from "./support/streams.js";
@@ -78,10 +81,8 @@ describe("WAL happy path (openRunLog/append/close)", () => {
     expect(fs.existsSync(final)).toBe(true);
 
     const lines = readJsonl(final);
-    expect(lines.length).toBe(3);
-    expect(lines[0]?.kind).toBe(WAL_LINE_KIND.Phase);
-    expect(lines[1]?.kind).toBe(WAL_LINE_KIND.Turn);
-    expect(lines[2]?.kind).toBe(WAL_LINE_KIND.Outcome);
+    const expectedKinds = [WAL_LINE_KIND.Phase, WAL_LINE_KIND.Turn, WAL_LINE_KIND.Outcome];
+    expect(lines.map((l) => l.kind)).toEqual(expectedKinds);
     expect((lines[2]?.payload as { status?: string }).status).toBe(RUN_CLOSE_STATUS.Completed);
   });
 
@@ -166,15 +167,17 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
     function* () {
       const resultsDir = mkTmpResultsDir("post-close-warn");
       const paths = walPathsFromResultsDir(resultsDir);
+      const runId = "run-post-close-warn";
+      const droppedValue = "this-event-was-dropped";
 
       const stderr = captureStream(process.stderr);
       try {
         yield* Effect.scoped(Effect.gen(function* () {
-          const handle = yield* openRunLog(RunId("run-post-close-warn"), paths);
+          const handle = yield* openRunLog(RunId(runId), paths);
           yield* handle.close({ status: RUN_CLOSE_STATUS.Completed });
           yield* handle.append({
             kind: WAL_LINE_KIND.Event,
-            payload: { critical: "this-event-was-dropped", value: 42 },
+            payload: { critical: droppedValue, value: 42 },
           });
         }));
       } finally {
@@ -202,15 +205,18 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
         })
         .filter(
           (parsed): parsed is WalWarnLine =>
-            parsed !== null && parsed.event === "append.after-close",
+            parsed !== null && parsed.event === WAL_WARN_EVENT.AppendAfterClose,
         );
 
       expect(afterCloseWarnings.length).toBe(1);
       const warning = afterCloseWarnings[0];
-      expect(warning?.runId).toBe("run-post-close-warn");
+      expect(warning?.runId).toBe(runId);
       expect(warning?.kind).toBe(WAL_LINE_KIND.Event);
-      expect(typeof warning?.payloadPreview).toBe("string");
-      expect(String(warning?.payloadPreview)).toContain("this-event-was-dropped");
+      // Payload preview is a string (proven by calling .length); content
+      // round-trips the dropped value so operators can identify it.
+      const preview = warning?.payloadPreview;
+      expect(typeof preview === "string" ? preview.length : 0).toBeGreaterThan(0);
+      expect(String(preview)).toContain(droppedValue);
     },
   );
 
@@ -242,7 +248,7 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
     } finally {
       stderr.restore();
     }
-    expect(exit._tag).toBe("Success");
+    expect(Exit.isSuccess(exit)).toBe(true);
 
     type WalWarnLine = {
       readonly source?: unknown;
@@ -264,7 +270,7 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
       })
       .filter(
         (w): w is WalWarnLine =>
-          w !== null && w.source === "cc-judge:wal" && w.runId === TEST_RUN_ID_ENOSPC,
+          w !== null && w.source === WAL_WARN_SOURCE && w.runId === TEST_RUN_ID_ENOSPC,
       );
 
     // At minimum: each failed append + the close-time fsync/outcome write
@@ -273,7 +279,7 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
     // append.failed is among the warned events.
     expect(warnings.length).toBeGreaterThan(0);
     const events = warnings.map((w) => w.event);
-    expect(events).toContain("append.failed");
+    expect(events).toContain(WAL_WARN_EVENT.AppendFailed);
   });
 });
 
@@ -475,9 +481,11 @@ describe("WAL line envelope", () => {
     for (const l of lines) {
       expect(l.v).toBe(WAL_LINE_VERSION);
       expect(l.runId).toBe(TEST_RUN_ID_ENVELOPE);
-      expect(typeof l.seq).toBe("number");
-      expect(typeof l.ts).toBe("number");
-      expect(typeof l.kind).toBe("string");
+      // Structural checks: numeric methods only succeed on numbers, kind
+      // is in the closed set of WAL_LINE_KIND values.
+      expect(Number.isFinite(l.seq)).toBe(true);
+      expect(Number.isFinite(l.ts)).toBe(true);
+      expect(Object.values(WAL_LINE_KIND)).toContain(l.kind);
       expect(l.payload).toBeDefined();
     }
   });

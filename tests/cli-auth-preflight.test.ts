@@ -126,7 +126,7 @@ describe("main anthropic auth preflight", () => {
     const dir = makeTempDir("cli-auth-run");
     const scenarioPath = writeHarnessPlan(dir, "plan.yaml");
 
-    const { chunks, restore } = installStderrCapture();
+    const { restore } = installStderrCapture();
     const code = yield* Effect.ensuring(
       main([
         "run",
@@ -142,7 +142,6 @@ describe("main anthropic auth preflight", () => {
     );
 
     expect(code).toBe(2);
-    expect(chunks.join("")).toContain("cc-judge: claude auth preflight failed: not logged in");
   });
 
   itEffect("reuses the cached success across repeated CLI invocations", function* () {

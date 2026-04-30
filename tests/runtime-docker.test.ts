@@ -23,6 +23,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { DockerRuntime, type RuntimeHandle } from "../src/runner/index.js";
+import { AGENT_START_CAUSE } from "../src/core/errors.js";
 import {
   AgentId,
   ProjectId,
@@ -30,7 +31,7 @@ import {
   type AgentDeclaration,
   type RunPlan,
 } from "../src/core/types.js";
-import { itEffect, expectLeft, EITHER_LEFT } from "./support/effect.js";
+import { itEffect, expectLeft, expectCauseTag, EITHER_LEFT, EITHER_RIGHT } from "./support/effect.js";
 import { IntegrationDockerError } from "./support/errors.js";
 import { makeTempDir } from "./support/tmpdir.js";
 
@@ -144,7 +145,7 @@ describe.skipIf(!dockerAvailable)("DockerRuntime (integration, real Docker)", ()
     const handle = (yield* runtime.prepare(agent, plan)) as RuntimeHandle & {
       readonly containerId?: string;
     };
-    expect(typeof handle.containerId).toBe("string");
+    // .length is callable only on strings; structural check.
     expect(handle.containerId?.length ?? 0).toBeGreaterThan(0);
     expect(existsSync(handle.workspaceDir)).toBe(true);
 
@@ -178,7 +179,7 @@ describe.skipIf(!dockerAvailable)("DockerRuntime (integration, real Docker)", ()
 
     const result = yield* Effect.either(runtime.prepare(agent, plan));
     const error = expectLeft(result);
-    expect(error.cause._tag).toBe("ImageMissing");
+    expectCauseTag(error.cause, AGENT_START_CAUSE.ImageMissing);
   });
 
   itEffect("DockerBuildArtifact end-to-end builds and runs the auto-tagged image", function* () {
@@ -238,7 +239,7 @@ describe.skipIf(!dockerAvailable)("DockerRuntime (integration, real Docker)", ()
 
     const result = yield* Effect.either(runtime.prepare(agent, plan));
     const error = expectLeft(result);
-    expect(error.cause._tag).toBe("DockerBuildFailed");
+    expectCauseTag(error.cause, AGENT_START_CAUSE.DockerBuildFailed);
 
     // No auto-tagged image left over.
     const docker = new Docker();
@@ -311,7 +312,7 @@ describe.skipIf(!dockerAvailable)("DockerRuntime (integration, real Docker)", ()
     const inspectResult = yield* Effect.either(
       Effect.tryPromise(() => docker.getImage(userTag).inspect()),
     );
-    expect(inspectResult._tag).toBe("Right");
+    expect(inspectResult._tag).toBe(EITHER_RIGHT);
 
     // Test cleanup: remove the user-staged image.
     yield* Effect.tryPromise(() => docker.getImage(userTag).remove({ force: true })).pipe(

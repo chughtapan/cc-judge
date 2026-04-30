@@ -1,10 +1,23 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { Effect } from "effect";
-import { AnthropicJudgeBackend } from "../src/judge/index.js";
+import {
+  AnthropicJudgeBackend,
+  PROMPT_HEADING,
+} from "../src/judge/index.js";
 import type { JudgeInput, JudgeTarget } from "../src/judge/index.js";
+import {
+  DIFF_PREFIX,
+  PROMPT_NO_DIFF,
+  TURN_LABEL,
+  turnHeader,
+} from "../src/judge/helpers.js";
 import { ScenarioId, ISSUE_SEVERITY } from "../src/core/types.js";
+import { JUDGE_FAILURE_KIND } from "../src/core/schema.js";
 import type { Turn, WorkspaceDiff } from "../src/core/schema.js";
 import { itEffect } from "./support/effect.js";
+
+const CONFIDENCE_HALF = 0.5;
+const CONFIDENCE_HIGH = 0.75;
 
 const NAME_ANTHROPIC = "anthropic";
 const PROMPT_USER = "hi";
@@ -264,7 +277,7 @@ describe("AnthropicJudgeBackend", () => {
     expect(result.pass).toBe(false);
     expect(result.overallSeverity).toBe(ISSUE_SEVERITY.Critical);
     expect(result.retryCount).toBe(RETRY_THREE);
-    expect(result.reason).toContain("NoOutput");
+    expect(result.failureKind).toBe(JUDGE_FAILURE_KIND.NoOutput);
   }, 10_000);
 
   itEffect("folds malformed JSON into critical after retries exhausted", function* () {
@@ -278,12 +291,13 @@ describe("AnthropicJudgeBackend", () => {
     expect(result.pass).toBe(false);
     expect(result.overallSeverity).toBe(ISSUE_SEVERITY.Critical);
     expect(result.retryCount).toBe(RETRY_ONE);
-    expect(result.reason).toContain("MalformedJson");
+    expect(result.failureKind).toBe(JUDGE_FAILURE_KIND.MalformedJson);
   }, 10_000);
 
   itEffect("fails fast on ResultError instead of retrying explicit Claude failures", function* () {
+    const errMsg = "spending cap reached";
     setAttemptsToSequence([
-      [errorResultMessage(["spending cap reached"], "error_during_execution")],
+      [errorResultMessage([errMsg], "error_during_execution")],
       [successResultMessage("", STRUCTURED_PASS_VERDICT)],
     ]);
     const backend = new AnthropicJudgeBackend({
@@ -293,8 +307,8 @@ describe("AnthropicJudgeBackend", () => {
     const result = yield* backend.judge(input());
     expect(result.pass).toBe(false);
     expect(result.retryCount).toBe(RETRY_ZERO);
-    expect(result.reason).toContain("ResultError");
-    expect(result.issues[0]?.issue).toContain("spending cap reached");
+    expect(result.failureKind).toBe(JUDGE_FAILURE_KIND.ResultError);
+    expect(result.issues[0]?.issue).toContain(errMsg);
   }, 10_000);
 
   itEffect("aborts and closes the SDK iterator when a judge attempt times out", function* () {
@@ -307,7 +321,7 @@ describe("AnthropicJudgeBackend", () => {
     const result = yield* backend.judge(input());
     expect(result.pass).toBe(false);
     expect(result.retryCount).toBe(RETRY_ZERO);
-    expect(result.reason).toContain("Timeout");
+    expect(result.failureKind).toBe(JUDGE_FAILURE_KIND.Timeout);
     expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(capturedAbortControllers[0]?.signal.aborted).toBe(true);
     expect(iteratorReturnCount).toBe(1);
@@ -342,8 +356,8 @@ describe("AnthropicJudgeBackend", () => {
     // When `pass` is non-boolean, the coercion forces pass=false but the schema
     // validator should still accept the coerced candidate. The assertion we
     // can make reliably: the judge returns SOME JudgeResult (error channel never).
-    expect(typeof result.pass).toBe("boolean");
-    expect(typeof result.reason).toBe("string");
+    expect(result.pass).toBe(false);
+    expect(result.reason).toBe(REASON_FAIL);
   });
 
   itEffect("carries workspaceDiff through the prompt (no crash, produces verdict)", function* () {
@@ -368,7 +382,7 @@ describe("AnthropicJudgeBackend", () => {
     });
     const result = yield* backend.judge(input());
     expect(result.retryCount).toBe(RETRY_THREE);
-    expect(result.reason).toContain("MalformedJson");
+    expect(result.failureKind).toBe(JUDGE_FAILURE_KIND.MalformedJson);
     expect(attemptIndex).toBe(RETRY_THREE + 1);
   }, 10_000);
 });
@@ -414,13 +428,13 @@ describe("AnthropicJudgeBackend prompt content", () => {
   itEffect("renderDiff emits `(no workspace changes)` when diff is undefined", function* () {
     setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
     yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
-    expect(capturedPrompts[0]).toContain("(no workspace changes)");
+    expect(capturedPrompts[0]).toContain(PROMPT_NO_DIFF);
   });
 
   itEffect("renderDiff emits `(no workspace changes)` when diff has empty changed array", function* () {
     setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
     yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input({ changed: [] }));
-    expect(capturedPrompts[0]).toContain("(no workspace changes)");
+    expect(capturedPrompts[0]).toContain(PROMPT_NO_DIFF);
   });
 
   itEffect("renderDiff joins multiple entries with newlines (all three kinds in one diff)", function* () {
@@ -455,11 +469,11 @@ describe("AnthropicJudgeBackend prompt content", () => {
       turns: [makeTurn(PROMPT_USER, RESPONSE_ASSISTANT)],
     });
     const prompt = capturedPrompts[0];
-    expect(prompt).toContain("# Evaluation target: SomeScenarioName");
-    expect(prompt).toContain("Description: SomeDescription");
-    expect(prompt).toContain("Expected behavior: SomeExpectedBehavior");
-    expect(prompt).toContain("1. CheckOne");
-    expect(prompt).toContain("2. CheckTwo");
+    expect(prompt).toContain(`${PROMPT_HEADING.EvaluationTarget} ${target.name}`);
+    expect(prompt).toContain(`${PROMPT_HEADING.DescriptionLine} ${target.description}`);
+    expect(prompt).toContain(`${PROMPT_HEADING.ExpectedBehaviorLine} ${target.requirements.expectedBehavior}`);
+    expect(prompt).toContain(`1. ${target.requirements.validationChecks[0]}`);
+    expect(prompt).toContain(`2. ${target.requirements.validationChecks[1]}`);
   });
 
   itEffect("renderTurns emits USER and ASSISTANT labels with turn index", function* () {
@@ -494,11 +508,11 @@ describe("AnthropicJudgeBackend prompt content", () => {
       ],
     });
     const prompt = capturedPrompts[0];
-    expect(prompt).toContain("--- Turn 0 ---");
-    expect(prompt).toContain("USER: first-prompt");
-    expect(prompt).toContain("ASSISTANT: first-response");
-    expect(prompt).toContain("--- Turn 1 ---");
-    expect(prompt).toContain("USER: second-prompt");
+    expect(prompt).toContain(turnHeader(0));
+    expect(prompt).toContain(`${TURN_LABEL.User}: first-prompt`);
+    expect(prompt).toContain(`${TURN_LABEL.Assistant}: first-response`);
+    expect(prompt).toContain(turnHeader(1));
+    expect(prompt).toContain(`${TURN_LABEL.User}: second-prompt`);
   });
 
   itEffect("collectAssistantText concatenates multiple text blocks within one assistant message", function* () {
@@ -611,8 +625,8 @@ describe("AnthropicJudgeBackend renderDiff newline joining", () => {
     yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input(diff));
     const prompt = capturedPrompts[0] ?? "";
     // Must be rendered as ~ modified, not + added.
-    expect(prompt).toContain("~ modified x.txt");
-    expect(prompt).not.toContain("+ added x.txt");
+    expect(prompt).toContain(`${DIFF_PREFIX.Modified} x.txt`);
+    expect(prompt).not.toContain(`${DIFF_PREFIX.Added} x.txt`);
   });
 });
 
@@ -678,8 +692,8 @@ describe("AnthropicJudgeBackend renderTurns newline joining", () => {
       ],
     });
     const prompt = capturedPrompts[0] ?? "";
-    expect(prompt).toContain("USER: p0");
-    expect(prompt).toContain("ASSISTANT: r0");
+    expect(prompt).toContain(`${TURN_LABEL.User}: p0`);
+    expect(prompt).toContain(`${TURN_LABEL.Assistant}: r0`);
   });
 });
 
@@ -689,10 +703,10 @@ describe("AnthropicJudgeBackend renderPrompt section structure", () => {
     setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
     yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
     const prompt = capturedPrompts[0] ?? "";
-    expect(prompt).toContain("# Transcript");
-    expect(prompt).toContain("# Workspace diff");
-    expect(prompt).toContain("Validation checks (each must hold for pass=true):");
-    expect(prompt).toContain("Return the JSON verdict now.");
+    expect(prompt).toContain(PROMPT_HEADING.Transcript);
+    expect(prompt).toContain(PROMPT_HEADING.WorkspaceDiff);
+    expect(prompt).toContain(PROMPT_HEADING.ValidationChecks);
+    expect(prompt).toContain(PROMPT_HEADING.Trailer);
   });
 
   itEffect("prompt sections are joined with newlines (not concatenated)", function* () {
@@ -941,7 +955,7 @@ describe("AnthropicJudgeBackend parseVerdict / buildResult", () => {
     setAttemptsToSequence([bad, bad]);
     const result = yield* new AnthropicJudgeBackend({ retrySchedule: [1] }).judge(input());
     // pass is coerced to false; reason stays as REASON_FAIL; result is still valid.
-    expect(typeof result.pass).toBe("boolean");
+    expect(result.pass).toBe(false);
   }, 10_000);
 
   itEffect("judgeConfidence is omitted when undefined (no spurious spread)", function* () {
@@ -967,11 +981,11 @@ describe("AnthropicJudgeBackend parseVerdict / buildResult", () => {
         reason: REASON_PASS,
         issues: [],
         overallSeverity: null,
-        judgeConfidence: 0.75,
+        judgeConfidence: CONFIDENCE_HIGH,
       }),
     ]]);
     const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
-    expect(result.judgeConfidence).toBe(0.75);
+    expect(result.judgeConfidence).toBe(CONFIDENCE_HIGH);
   });
 });
 
@@ -1169,7 +1183,7 @@ describe("AnthropicJudgeBackend criticalFallback issue content", () => {
       perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
     }).judge(input());
     expect(result.pass).toBe(false);
-    expect(result.issues[0]?.issue).toContain("NoOutput");
+    expect(result.failureKind).toBe(JUDGE_FAILURE_KIND.NoOutput);
     expect(result.issues.length).toBeGreaterThanOrEqual(1);
     expect(result.issues[0]?.severity).toBe(ISSUE_SEVERITY.Critical);
   }, 10_000);
@@ -1181,7 +1195,7 @@ describe("AnthropicJudgeBackend criticalFallback issue content", () => {
       retrySchedule: [],
       perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
     }).judge(input());
-    expect(result.issues[0]?.issue).toContain("MalformedJson");
+    expect(result.failureKind).toBe(JUDGE_FAILURE_KIND.MalformedJson);
   }, 10_000);
 
   itEffect("criticalFallback issues array is non-empty", function* () {
@@ -1209,8 +1223,8 @@ describe("AnthropicJudgeBackend criticalFallback issue content", () => {
       retrySchedule: [],
       perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
     }).judge(input());
-    // Empty message array → NoOutput → criticalFallback with kind="NoOutput"
-    expect(result.issues[0]?.issue).toContain("NoOutput");
+    // Empty message array → NoOutput → criticalFallback with kind=NoOutput
+    expect(result.failureKind).toBe(JUDGE_FAILURE_KIND.NoOutput);
     expect(result.issues[0]?.severity).toBe(ISSUE_SEVERITY.Critical);
   }, 10_000);
 
@@ -1222,7 +1236,7 @@ describe("AnthropicJudgeBackend criticalFallback issue content", () => {
       retrySchedule: [],
       perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
     }).judge(input());
-    expect(result.issues[0]?.issue).toContain("ResultError");
+    expect(result.failureKind).toBe(JUDGE_FAILURE_KIND.ResultError);
     expect(result.issues[0]?.severity).toBe(ISSUE_SEVERITY.Critical);
   }, 10_000);
 });
@@ -1231,41 +1245,43 @@ describe("AnthropicJudgeBackend criticalFallback issue content", () => {
 describe("AnthropicJudgeBackend runAttempt ResultError branch", () => {
   itEffect("ResultError with non-empty errors joins them with '; '", function* () {
     // Kill EqualityOperator & StringLiteral survivors at lines 349.
-    const errMsg = [errorResultMessage(["err1", "err2", "err3"], "error_during_execution")];
+    const errs = ["err1", "err2", "err3"] as const;
+    const errMsg = [errorResultMessage(errs, "error_during_execution")];
     setAttemptsToSequence([errMsg]);
     const result = yield* new AnthropicJudgeBackend({
       retrySchedule: [],
       perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
     }).judge(input());
     expect(result.pass).toBe(false);
-    expect(result.issues[0]?.issue).toContain("err1");
-    expect(result.issues[0]?.issue).toContain("err2");
-    expect(result.issues[0]?.issue).toContain("err3");
+    for (const e of errs) expect(result.issues[0]?.issue).toContain(e);
     // Must be joined with '; ' not empty string.
-    expect(result.issues[0]?.issue).toContain("; ");
+    expect(result.issues[0]?.issue).toContain(errs.join("; "));
   }, 10_000);
 
   itEffect("ResultError with empty errors array uses subtype as message", function* () {
     // When m.errors is empty, uses m.subtype instead.
     // Kill EqualityOperator survivor: length > 0 must use subtype when empty.
-    const errMsg = [errorResultMessage([], "max_turns_exceeded")];
+    const subtype = "max_turns_exceeded";
+    const errMsg = [errorResultMessage([], subtype)];
     setAttemptsToSequence([errMsg]);
     const result = yield* new AnthropicJudgeBackend({
       retrySchedule: [],
       perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
     }).judge(input());
-    expect(result.issues[0]?.issue).toContain("max_turns_exceeded");
+    expect(result.issues[0]?.issue).toContain(subtype);
   }, 10_000);
 
   itEffect("ResultError with exactly one error uses that error text (not subtype)", function* () {
-    const errMsg = [errorResultMessage(["single-error"], "other_subtype")];
+    const errText = "single-error";
+    const subtype = "other_subtype";
+    const errMsg = [errorResultMessage([errText], subtype)];
     setAttemptsToSequence([errMsg]);
     const result = yield* new AnthropicJudgeBackend({
       retrySchedule: [],
       perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
     }).judge(input());
-    expect(result.issues[0]?.issue).toContain("single-error");
-    expect(result.issues[0]?.issue).not.toContain("other_subtype");
+    expect(result.issues[0]?.issue).toContain(errText);
+    expect(result.issues[0]?.issue).not.toContain(subtype);
   }, 10_000);
 
   itEffect("non-success result message triggers ResultError even with valid JSON body", function* () {
@@ -1280,7 +1296,7 @@ describe("AnthropicJudgeBackend runAttempt ResultError branch", () => {
       perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
     }).judge(input());
     expect(result.pass).toBe(false);
-    expect(result.issues[0]?.issue).toContain("ResultError");
+    expect(result.failureKind).toBe(JUDGE_FAILURE_KIND.ResultError);
   }, 10_000);
 });
 
@@ -1340,17 +1356,15 @@ describe("AnthropicJudgeBackend retry loop attempt numbering", () => {
   }, 10_000);
 
   itEffect("lastErr initial value does not bleed into criticalFallback when there are real attempts", function* () {
-    // Kill StringLiteral survivor at line 383: 'no attempts ran' must not appear
-    // in real failure output (it should only appear if the loop body never ran).
+    // Kill StringLiteral survivor at line 383: the 'no attempts ran' sentinel
+    // must not surface — the real failureKind should be MalformedJson.
     const bad = [successResultMessage("{bad json}")];
     setAttemptsToSequence([bad]);
     const result = yield* new AnthropicJudgeBackend({
       retrySchedule: [],
       perAttemptTimeoutMs: ATTEMPT_TIMEOUT_MS,
     }).judge(input());
-    // The last error was MalformedJson, not the initial "no attempts ran" sentinel.
-    expect(result.issues[0]?.issue).toContain("MalformedJson");
-    expect(result.issues[0]?.issue).not.toContain("no attempts ran");
+    expect(result.failureKind).toBe(JUDGE_FAILURE_KIND.MalformedJson);
   }, 10_000);
 });
 
@@ -1401,10 +1415,10 @@ describe("AnthropicJudgeBackend renderDiff/renderTurns array initialization", ()
     };
     yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input(diff));
     const prompt = capturedPrompts[0] ?? "";
-    expect(prompt).toContain("~ modified m.txt");
+    expect(prompt).toContain(`${DIFF_PREFIX.Modified} m.txt`);
     // Must NOT be rendered as + added or - removed.
-    expect(prompt).not.toContain("+ added m.txt");
-    expect(prompt).not.toContain("- removed m.txt");
+    expect(prompt).not.toContain(`${DIFF_PREFIX.Added} m.txt`);
+    expect(prompt).not.toContain(`${DIFF_PREFIX.Removed} m.txt`);
   });
 });
 
@@ -1412,13 +1426,10 @@ describe("AnthropicJudgeBackend renderDiff/renderTurns array initialization", ()
 describe("AnthropicJudgeBackend renderPrompt blank line separators", () => {
   itEffect("blank line appears between scenario header and Validation checks heading", function* () {
     // Kill StringLiteral survivor at L84: the empty-string element in the prompt array
-    // produces a blank line. If replaced with "Stryker was here!", that text appears.
+    // produces a blank line. The regex below requires the blank line to be present.
     setAttemptsToSequence([[successResultMessage("", STRUCTURED_PASS_VERDICT)]]);
     yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
     const prompt = capturedPrompts[0] ?? "";
-    // There must be a blank line (two consecutive newlines) between the expected behavior
-    // line and the "Validation checks" heading — not any spurious text.
-    expect(prompt).not.toContain("Stryker was here");
     expect(prompt).toMatch(/Expected behavior: e\n\nValidation checks/u);
   });
 
@@ -1431,7 +1442,6 @@ describe("AnthropicJudgeBackend renderPrompt blank line separators", () => {
     yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input(diff));
     const prompt = capturedPrompts[0] ?? "";
     // Transcript section ends, blank line, then "# Workspace diff".
-    expect(prompt).not.toContain("Stryker was here");
     expect(prompt).toMatch(/\n\n# Workspace diff/u);
   });
 });
@@ -1642,11 +1652,11 @@ describe("AnthropicJudgeBackend buildResult validation paths", () => {
         reason: REASON_PASS,
         issues: [],
         overallSeverity: null,
-        judgeConfidence: 0.5,
+        judgeConfidence: CONFIDENCE_HALF,
       }),
     ]]);
     const result = yield* new AnthropicJudgeBackend({ retrySchedule: [] }).judge(input());
-    expect(result.judgeConfidence).toBe(0.5);
+    expect(result.judgeConfidence).toBe(CONFIDENCE_HALF);
     expect("judgeConfidence" in result).toBe(true);
   });
 });

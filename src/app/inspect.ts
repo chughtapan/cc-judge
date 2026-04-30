@@ -33,6 +33,11 @@ export type InspectErrorCause =
 
 export const InspectErrorCause = Data.taggedEnum<InspectErrorCause>();
 
+export const INSPECT_CAUSE = {
+  RunNotFound: "RunNotFound",
+  DuplicateSeq: "DuplicateSeq",
+} as const satisfies { readonly [K in InspectErrorCause["_tag"]]: K };
+
 export class InspectError extends Data.TaggedError("InspectError")<{
   readonly cause: InspectErrorCause;
 }> {}
@@ -190,62 +195,129 @@ function summaryForPayload(kind: WalLineKind, payload: unknown): string {
   }
 }
 
-function renderTimeline(
-  lines: ReadonlyArray<WalLine>,
-  source: "inflight" | "completed",
-): void {
-  const eventLines = lines.filter(
-    (l) => l.kind !== WAL_LINE_KIND.Outcome && l.kind !== WAL_LINE_KIND.Orphaned,
-  );
-  const outcomeLines = lines.filter((l) => l.kind === WAL_LINE_KIND.Outcome);
+// ---------------------------------------------------------------------------
+// Structured report — the testable surface of inspect.
+//
+// `inspectRun` returns this report; `formatInspectReport` turns it into the
+// CLI's stdout/stderr strings. Tests assert on the report; rendering is just
+// presentation.
+// ---------------------------------------------------------------------------
 
-  if (eventLines.length === 0 && outcomeLines.length === 0) {
-    process.stdout.write("  no events, no outcome\n");
-    return;
+export type InspectSource = "inflight" | "completed";
+
+export const INSPECT_SOURCE = {
+  Inflight: "inflight",
+  Completed: "completed",
+} as const satisfies { readonly [K in Capitalize<InspectSource>]: Uncapitalize<K> };
+
+export interface InspectOutcomeView {
+  readonly status: string | null;
+  readonly reason: string | null;
+}
+
+export interface InspectReport {
+  readonly runId: string;
+  readonly source: InspectSource;
+  readonly events: ReadonlyArray<WalLine>;
+  readonly outcome: InspectOutcomeView | null;
+  readonly gaps: ReadonlyArray<number>;
+}
+
+function readOutcomePayload(line: WalLine): InspectOutcomeView {
+  type OutcomePayload = { status?: unknown; reason?: unknown };
+  const p: OutcomePayload =
+    typeof line.payload === "object" && line.payload !== null
+      ? (line.payload as OutcomePayload)
+      : {};
+  return {
+    status: typeof p.status === "string" ? p.status : null,
+    reason: typeof p.reason === "string" ? p.reason : null,
+  };
+}
+
+function buildReport(
+  runId: string,
+  source: InspectSource,
+  lines: ReadonlyArray<WalLine>,
+  gaps: ReadonlyArray<number>,
+): InspectReport {
+  const events = lines
+    .filter((l) => l.kind !== WAL_LINE_KIND.Outcome && l.kind !== WAL_LINE_KIND.Orphaned)
+    .slice()
+    .sort((a, b) => a.seq - b.seq);
+
+  const outcomeLines = lines.filter((l) => l.kind === WAL_LINE_KIND.Outcome);
+  const lastOutcome = outcomeLines[outcomeLines.length - 1];
+
+  return {
+    runId,
+    source,
+    events,
+    outcome: lastOutcome !== undefined ? readOutcomePayload(lastOutcome) : null,
+    gaps,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Rendering — pure string formatting. Not unit-tested directly.
+// ---------------------------------------------------------------------------
+
+export interface InspectRenderOutput {
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+export function formatInspectReport(report: InspectReport): InspectRenderOutput {
+  const stderrParts: string[] = [];
+  for (const missing of report.gaps) {
+    stderrParts.push(
+      `cc-judge inspect: warning: missing seq ${String(missing)}\n`,
+    );
   }
 
-  const sorted = [...eventLines].sort((a, b) => a.seq - b.seq);
-  const lastLine = sorted[sorted.length - 1];
-  const maxSeq = lastLine !== undefined ? lastLine.seq : 0;
+  const stdoutParts: string[] = [];
+  stdoutParts.push(`cc-judge inspect: run ${report.runId} [${report.source}]\n\n`);
+
+  if (report.events.length === 0 && report.outcome === null) {
+    stdoutParts.push("  no events, no outcome\n");
+    return { stdout: stdoutParts.join(""), stderr: stderrParts.join("") };
+  }
+
+  const lastEvent = report.events[report.events.length - 1];
+  const maxSeq = lastEvent !== undefined ? lastEvent.seq : 0;
   const seqWidth = Math.max(String(maxSeq).length, 1);
 
-  const out: string[] = [];
-  for (const l of sorted) {
+  for (const l of report.events) {
     const seqStr = String(l.seq).padStart(seqWidth, " ");
     const ts = new Date(l.ts).toISOString();
     const kind = l.kind.padEnd(14, " ");
     const summary = summaryForPayload(l.kind, l.payload);
     const tail = summary.length > 0 ? `  ${summary}` : "";
-    out.push(`  ${seqStr}  ${ts}  ${kind}${tail}\n`);
+    stdoutParts.push(`  ${seqStr}  ${ts}  ${kind}${tail}\n`);
   }
 
-  const lastOutcome = outcomeLines[outcomeLines.length - 1];
-  if (lastOutcome !== undefined) {
-    type OutcomePayload = { status?: unknown; reason?: unknown };
-    const p: OutcomePayload =
-      typeof lastOutcome.payload === "object" && lastOutcome.payload !== null
-        ? (lastOutcome.payload as OutcomePayload)
-        : {};
-    const status = typeof p.status === "string" ? p.status : "unknown";
-    const reason = typeof p.reason === "string" ? ` (${p.reason})` : "";
-    out.push(`\n  outcome: ${status}${reason}\n`);
+  if (report.outcome !== null) {
+    const status = report.outcome.status ?? "unknown";
+    const reason = report.outcome.reason !== null ? ` (${report.outcome.reason})` : "";
+    stdoutParts.push(`\n  outcome: ${status}${reason}\n`);
   } else {
     const msg =
-      source === "inflight" ? "run still in flight" : "no outcome line found";
-    out.push(`\n  outcome: (none — ${msg})\n`);
+      report.source === "inflight" ? "run still in flight" : "no outcome line found";
+    stdoutParts.push(`\n  outcome: (none — ${msg})\n`);
   }
 
-  process.stdout.write(out.join(""));
+  return { stdout: stdoutParts.join(""), stderr: stderrParts.join("") };
 }
 
 // ---------------------------------------------------------------------------
 // Public entrypoint — exported for SDK use and CLI wiring in cli.ts.
+// `inspectRun` returns the structured report; CLI wraps it with rendering.
 // ---------------------------------------------------------------------------
 
 export function inspectRun(
   runId: string,
   resultsDir: string,
-): Effect.Effect<void, InspectError, never> {
+): Effect.Effect<InspectReport, InspectError, never> {
   return Effect.suspend(() => {
     const walPaths = walPathsFromResultsDir(path.resolve(resultsDir));
     const resolved = resolveWalFile(runId, walPaths);
@@ -258,7 +330,6 @@ export function inspectRun(
     const { lines } = parseWalFile(file);
     const { gaps, duplicates } = checkSeqs(lines);
 
-    // Duplicate seq aborts: the file cannot be reliably interpreted.
     const firstDup = duplicates[0];
     if (firstDup !== undefined) {
       return Effect.fail(
@@ -266,16 +337,19 @@ export function inspectRun(
       );
     }
 
-    // Gap detection is advisory: warn but continue rendering.
-    for (const missing of gaps) {
-      process.stderr.write(
-        `cc-judge inspect: warning: missing seq ${String(missing)}\n`,
-      );
-    }
-
-    process.stdout.write(`cc-judge inspect: run ${runId} [${source}]\n\n`);
-    renderTimeline(lines, source);
-
-    return Effect.void;
+    return Effect.succeed(buildReport(runId, source, lines, gaps));
   });
+}
+
+export function inspectRunAndPrint(
+  runId: string,
+  resultsDir: string,
+): Effect.Effect<void, InspectError, never> {
+  return Effect.flatMap(inspectRun(runId, resultsDir), (report) =>
+    Effect.sync(() => {
+      const { stdout, stderr } = formatInspectReport(report);
+      if (stderr.length > 0) process.stderr.write(stderr);
+      if (stdout.length > 0) process.stdout.write(stdout);
+    }),
+  );
 }

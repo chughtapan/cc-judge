@@ -214,10 +214,13 @@ describe("sumAgentTurns (PBT)", () => {
 // ── bundleModelName ─────────────────────────────────────────────────────────
 
 describe("bundleModelName (PBT)", () => {
+  const PROJECT = "p";
+  const FALLBACK_MODEL_NAME = `${PROJECT}/bundle`;
+
   function bundleWithMetadata(metadata: Record<string, unknown> | undefined): JudgmentBundle {
     return {
       runId: RunId("r"),
-      project: ProjectId("p"),
+      project: ProjectId(PROJECT),
       scenarioId: ScenarioId("s"),
       name: "n",
       description: "d",
@@ -252,7 +255,7 @@ describe("bundleModelName (PBT)", () => {
         ),
         (metadata) => {
           const bundle = bundleWithMetadata(metadata as Record<string, unknown> | undefined);
-          expect(bundleModelName(bundle)).toBe("p/bundle");
+          expect(bundleModelName(bundle)).toBe(FALLBACK_MODEL_NAME);
         },
       ),
       { numRuns: RUNS },
