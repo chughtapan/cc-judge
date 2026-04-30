@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { Effect } from "effect";
-import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 import * as YAML from "yaml";
 import { makeReportEmitter, readRunsJsonl } from "../src/emit/report.js";
 import { ScenarioId, RunNumber, RUN_SOURCE } from "../src/core/types.js";
 import type { RunRecord, Report } from "../src/core/schema.js";
 import { PublishError } from "../src/core/errors.js";
 import { itEffect, EITHER_LEFT } from "./support/effect.js";
+import { makeTempDir } from "./support/tmpdir.js";
 
 // ── Fixture constants ────────────────────────────────────────────────────────
 const SCEN_A_ID = "scen-a";
@@ -77,7 +77,7 @@ function makeRecord(id: string, run: number, pass: boolean): RunRecord {
 }
 
 function tmpDir(): string {
-  return mkdtempSync(path.join(os.tmpdir(), "cc-judge-emit-"));
+  return makeTempDir("emit");
 }
 
 describe("ReportEmitter", () => {

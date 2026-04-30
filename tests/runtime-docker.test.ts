@@ -17,11 +17,10 @@
 // - User-supplied imageTag preserved on build failure
 
 import { afterAll, beforeAll, describe, expect } from "vitest";
-import { Data, Effect } from "effect";
+import { Effect } from "effect";
 import Docker from "dockerode";
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import { DockerRuntime, type RuntimeHandle } from "../src/runner/index.js";
 import {
@@ -32,14 +31,8 @@ import {
   type RunPlan,
 } from "../src/core/types.js";
 import { itEffect, expectLeft, EITHER_LEFT } from "./support/effect.js";
-
-// Tagged error for upstream Promise wrappers used in this test file —
-// keeps the Effect channel typed (no generic Error in the lint-checked
-// surface) while letting test assertions surface dockerode rejections
-// with their original message.
-class IntegrationDockerError extends Data.TaggedError("IntegrationDockerError")<{
-  readonly message: string;
-}> {}
+import { IntegrationDockerError } from "./support/errors.js";
+import { makeTempDir } from "./support/tmpdir.js";
 
 // Boundary helper that adapts dockerode's Promise-returning API into a
 // typed Effect. The lint rule against Promise<> return types targets
@@ -189,7 +182,7 @@ describe.skipIf(!dockerAvailable)("DockerRuntime (integration, real Docker)", ()
   });
 
   itEffect("DockerBuildArtifact end-to-end builds and runs the auto-tagged image", function* () {
-    const repoRoot = mkdtempSync(path.join(os.tmpdir(), "cc-judge-int-build-"));
+    const repoRoot = makeTempDir("int-build");
     const contextPath = path.join(repoRoot, "ctx");
     mkdirSync(contextPath, { recursive: true });
     writeFileSync(
@@ -223,7 +216,7 @@ describe.skipIf(!dockerAvailable)("DockerRuntime (integration, real Docker)", ()
   });
 
   itEffect("DockerBuildArtifact failure removes the auto-tagged partial image", function* () {
-    const repoRoot = mkdtempSync(path.join(os.tmpdir(), "cc-judge-int-build-fail-"));
+    const repoRoot = makeTempDir("int-build-fail");
     const contextPath = path.join(repoRoot, "ctx");
     mkdirSync(contextPath, { recursive: true });
     writeFileSync(
@@ -256,7 +249,7 @@ describe.skipIf(!dockerAvailable)("DockerRuntime (integration, real Docker)", ()
   });
 
   itEffect("DockerBuildArtifact failure preserves a user-supplied imageTag", function* () {
-    const repoRoot = mkdtempSync(path.join(os.tmpdir(), "cc-judge-int-build-userTag-"));
+    const repoRoot = makeTempDir("int-build-userTag");
     const contextPath = path.join(repoRoot, "ctx");
     mkdirSync(contextPath, { recursive: true });
     writeFileSync(

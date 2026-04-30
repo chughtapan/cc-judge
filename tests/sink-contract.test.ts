@@ -17,7 +17,7 @@ import {
   type AgentTurn,
   type RunPlan,
 } from "../src/core/types.js";
-import { itEffect, expectLeft } from "./support/effect.js";
+import { itEffect, expectLeft, expectCauseTag } from "./support/effect.js";
 
 const AGENT_A = AgentId("agent-a");
 const AGENT_B = AgentId("agent-b");
@@ -77,11 +77,8 @@ describe("makeNormalizedBundleSink: harness contract", () => {
   itEffect("recordTurn rejects an unknown agentId with UnknownAgent", function* () {
     const sink = makeNormalizedBundleSink(makePlan([AGENT_A]), "run-1");
     const result = yield* Effect.either(sink.recordTurn(makeAgentTurn(PHANTOM)));
-    const error = expectLeft(result);
-    expect(error.cause._tag).toBe("UnknownAgent");
-    if (error.cause._tag === "UnknownAgent") {
-      expect(error.cause.agentId).toBe(PHANTOM);
-    }
+    const cause = expectCauseTag(expectLeft(result).cause, "UnknownAgent");
+    expect(cause.agentId).toBe(PHANTOM);
   });
 
   itEffect("recordTurn accepts a known agentId", function* () {
@@ -99,22 +96,16 @@ describe("makeNormalizedBundleSink: harness contract", () => {
   itEffect("recordOutcome rejects an unknown agentId with UnknownAgent", function* () {
     const sink = makeNormalizedBundleSink(makePlan([AGENT_A]), "run-1");
     const result = yield* Effect.either(sink.recordOutcome(makeOutcome(PHANTOM)));
-    const error = expectLeft(result);
-    expect(error.cause._tag).toBe("UnknownAgent");
-    if (error.cause._tag === "UnknownAgent") {
-      expect(error.cause.agentId).toBe(PHANTOM);
-    }
+    const cause = expectCauseTag(expectLeft(result).cause, "UnknownAgent");
+    expect(cause.agentId).toBe(PHANTOM);
   });
 
   itEffect("recordOutcome rejects a second outcome for the same agent", function* () {
     const sink = makeNormalizedBundleSink(makePlan([AGENT_A]), "run-1");
     yield* sink.recordOutcome(makeOutcome(AGENT_A));
     const result = yield* Effect.either(sink.recordOutcome(makeOutcome(AGENT_A)));
-    const error = expectLeft(result);
-    expect(error.cause._tag).toBe("DuplicateOutcome");
-    if (error.cause._tag === "DuplicateOutcome") {
-      expect(error.cause.agentId).toBe(AGENT_A);
-    }
+    const cause = expectCauseTag(expectLeft(result).cause, "DuplicateOutcome");
+    expect(cause.agentId).toBe(AGENT_A);
   });
 
   // ── finalize ─────────────────────────────────────────────────────────────
@@ -123,11 +114,8 @@ describe("makeNormalizedBundleSink: harness contract", () => {
     const sink = makeNormalizedBundleSink(makePlan([AGENT_A, AGENT_B]), "run-1");
     yield* sink.recordOutcome(makeOutcome(AGENT_A));
     const result = yield* Effect.either(sink.finalize());
-    const error = expectLeft(result);
-    expect(error.cause._tag).toBe("MissingOutcomes");
-    if (error.cause._tag === "MissingOutcomes") {
-      expect(error.cause.agentIds).toEqual([AGENT_B]);
-    }
+    const cause = expectCauseTag(expectLeft(result).cause, "MissingOutcomes");
+    expect(cause.agentIds).toEqual([AGENT_B]);
   });
 
   itEffect(
@@ -135,10 +123,8 @@ describe("makeNormalizedBundleSink: harness contract", () => {
     function* () {
       const sink = makeNormalizedBundleSink(makePlan([AGENT_A, AGENT_B]), "run-1");
       const result = yield* Effect.either(sink.finalize());
-      const error = expectLeft(result);
-      if (error.cause._tag === "MissingOutcomes") {
-        expect(error.cause.agentIds).toEqual([AGENT_A, AGENT_B]);
-      }
+      const cause = expectCauseTag(expectLeft(result).cause, "MissingOutcomes");
+      expect(cause.agentIds).toEqual([AGENT_A, AGENT_B]);
     },
   );
 

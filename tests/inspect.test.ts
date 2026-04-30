@@ -16,13 +16,14 @@ import { WAL_LINE_KIND, WAL_LINE_VERSION } from "../src/emit/wal.js";
 import { inspectRun, InspectError } from "../src/app/inspect.js";
 import { expectLeft, itEffect } from "./support/effect.js";
 import { captureStream, type CaptureHandle } from "./support/streams.js";
+import { makeTempDir } from "./support/tmpdir.js";
 
 // ---------------------------------------------------------------------------
 // WAL line fixture helpers.
 // ---------------------------------------------------------------------------
 
 function mkTmpResultsDir(tag: string): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `cc-judge-inspect-${tag}-`));
+  return makeTempDir(`inspect-${tag}`);
 }
 
 interface WalLineFixture {

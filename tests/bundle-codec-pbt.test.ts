@@ -4,7 +4,7 @@
 // against generated bundles spanning the schema's input domain.
 
 import { describe, expect } from "vitest";
-import { Data, Effect } from "effect";
+import { Effect } from "effect";
 import * as fc from "fast-check";
 import {
   bundleAutoCodec,
@@ -13,13 +13,7 @@ import {
   type BundleCodec,
 } from "../src/emit/bundle-codec.js";
 import { BundleDecodeError } from "../src/core/errors.js";
-
-// Tagged error for fast-check rejections so the test's Effect channel
-// stays typed (no generic Error). The message field carries fast-check's
-// shrunk-counterexample report verbatim.
-class PbtAssertionError extends Data.TaggedError("PbtAssertionError")<{
-  readonly message: string;
-}> {}
+import { PbtAssertionError } from "./support/errors.js";
 import {
   AGENT_LIFECYCLE_STATUS,
   AgentId,

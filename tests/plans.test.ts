@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, vi } from "vitest";
 import { Effect } from "effect";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { makeTempDir } from "./support/tmpdir.js";
 import * as YAML from "yaml";
 import { main } from "../src/app/cli.js";
 import {
@@ -167,7 +168,7 @@ describe("planned harness loader", () => {
   });
 
   itEffect("rejects duplicate scenario ids across matched files", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-dup-"));
+    const dir = makeTempDir("plans-dup");
     const harnessModulePath = writeHarnessModule(dir);
     writePlanFile(dir, "a.yaml", planYaml(harnessModulePath, { scenarioId: "duplicate-scenario" }));
     writePlanFile(dir, "b.yaml", planYaml(harnessModulePath, { scenarioId: "duplicate-scenario" }));
@@ -186,7 +187,7 @@ describe("planned harness loader", () => {
 
 describe("planned harness compiler + cli ingress", () => {
   itEffect("compiles loaded documents into planned run inputs", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-compile-"));
+    const dir = makeTempDir("plans-compile");
     const harnessModulePath = writeHarnessModule(dir);
     const sourcePath = writePlanFile(dir, "compiled.yaml", planYaml(harnessModulePath));
     const documents = yield* loadPlannedHarnessPath(sourcePath);
@@ -203,10 +204,10 @@ describe("planned harness compiler + cli ingress", () => {
   });
 
   itEffect("runs a planned-harness path through the existing runPlans pipeline", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-run-"));
+    const dir = makeTempDir("plans-run");
     const harnessModulePath = writeHarnessModule(dir);
     const planPath = writePlanFile(dir, "single.yaml", planYaml(harnessModulePath));
-    const resultsDir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-out-"));
+    const resultsDir = makeTempDir("plans-out");
 
     const report = yield* runPlannedHarnessPath(planPath, { resultsDir });
 
@@ -222,10 +223,10 @@ describe("planned harness compiler + cli ingress", () => {
   });
 
   itEffect("forwards totalTimeoutMs into the planned-harness run pipeline", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-timeout-"));
+    const dir = makeTempDir("plans-timeout");
     const harnessModulePath = writeHarnessModule(dir);
     const planPath = writePlanFile(dir, "timeout.yaml", planYaml(harnessModulePath));
-    const resultsDir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-timeout-out-"));
+    const resultsDir = makeTempDir("plans-timeout-out");
 
     yield* runPlannedHarnessPath(planPath, {
       resultsDir,
@@ -236,10 +237,10 @@ describe("planned harness compiler + cli ingress", () => {
   });
 
   itEffect("dispatches `run` through the CLI with explicit harness YAML", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-cli-"));
+    const dir = makeTempDir("plans-cli");
     const harnessModulePath = writeHarnessModule(dir);
     const planPath = writePlanFile(dir, "cli.yaml", planYaml(harnessModulePath));
-    const resultsDir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-cli-out-"));
+    const resultsDir = makeTempDir("plans-cli-out");
 
     const code = yield* main([
       "run",
@@ -260,7 +261,7 @@ describe("planned harness compiler + cli ingress", () => {
   });
 
   itEffect("returns exit 2 when harness export is missing", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-missing-export-"));
+    const dir = makeTempDir("plans-missing-export");
     const harnessModulePath = writeHarnessModule(dir);
     const planPath = writePlanFile(
       dir,
@@ -274,7 +275,7 @@ describe("planned harness compiler + cli ingress", () => {
   });
 
   itEffect("returns exit 2 with a parse error from the harness plan loader", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-invalid-"));
+    const dir = makeTempDir("plans-invalid");
     const badPath = writePlanFile(dir, "broken.yaml", "harness:\n  module: [\n");
     const stderr = captureStream(process.stderr);
 
@@ -292,7 +293,7 @@ describe("planned harness compiler + cli ingress", () => {
   // PlannedHarnessIngressError (HarnessPlanLoadFailed cause).
 
   itEffect("compiler maps a synchronous throw from load() to a typed error", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-throw-"));
+    const dir = makeTempDir("plans-load-throw");
     const harnessModulePath = path.join(dir, "throw-harness.mjs");
     writeFileSync(
       harnessModulePath,
@@ -324,7 +325,7 @@ describe("planned harness compiler + cli ingress", () => {
   itEffect(
     "compiler maps a non-Effect return value from load() to a typed error",
     function* () {
-      const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-nonEffect-"));
+      const dir = makeTempDir("plans-load-nonEffect");
       const harnessModulePath = path.join(dir, "promise-harness.mjs");
       writeFileSync(
         harnessModulePath,
@@ -360,7 +361,7 @@ describe("planned harness compiler + cli ingress", () => {
   // compiler.ts that produces the "got <X>" suffix.
 
   itEffect("compiler error names 'null' when load() returns null", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-null-"));
+    const dir = makeTempDir("plans-load-null");
     const harnessModulePath = path.join(dir, "null-harness.mjs");
     writeFileSync(
       harnessModulePath,
@@ -379,7 +380,7 @@ describe("planned harness compiler + cli ingress", () => {
   });
 
   itEffect("compiler error names the typeof when load() returns a primitive", function* () {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-num-"));
+    const dir = makeTempDir("plans-load-num");
     const harnessModulePath = path.join(dir, "num-harness.mjs");
     writeFileSync(
       harnessModulePath,
@@ -400,7 +401,7 @@ describe("planned harness compiler + cli ingress", () => {
   itEffect(
     "compiler error names 'object' when load() returns a plain object without then",
     function* () {
-      const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-obj-"));
+      const dir = makeTempDir("plans-load-obj");
       const harnessModulePath = path.join(dir, "obj-harness.mjs");
       writeFileSync(
         harnessModulePath,
@@ -422,7 +423,7 @@ describe("planned harness compiler + cli ingress", () => {
   itEffect(
     "compiler maps an uncaught defect inside the load() Effect to a typed error",
     function* () {
-      const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-plans-load-defect-"));
+      const dir = makeTempDir("plans-load-defect");
       const harnessModulePath = path.join(dir, "defect-harness.mjs");
       writeFileSync(
         harnessModulePath,

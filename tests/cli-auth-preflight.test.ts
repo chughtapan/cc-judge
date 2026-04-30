@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Effect } from "effect";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { writeFileSync } from "node:fs";
 import * as path from "node:path";
 import * as YAML from "yaml";
+import { makeTempDir } from "./support/tmpdir.js";
 
 const { spawnSyncMock } = vi.hoisted(() => ({
   spawnSyncMock: vi.fn(),
@@ -107,7 +107,7 @@ describe("main anthropic auth preflight", () => {
     spawnSyncMock.mockReset();
     resetJudgePreflightCacheForTests();
     clearJudgePreflightDiskCacheForTests();
-    setEnvVar("XDG_CACHE_HOME", mkdtempSync(path.join(os.tmpdir(), "cc-judge-cli-auth-cache-")));
+    setEnvVar("XDG_CACHE_HOME", makeTempDir("cli-auth-cache"));
     deleteEnvVar("ANTHROPIC_API_KEY");
   });
 
@@ -123,7 +123,7 @@ describe("main anthropic auth preflight", () => {
       stderr: "not logged in",
       error: undefined,
     });
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-cli-auth-run-"));
+    const dir = makeTempDir("cli-auth-run");
     const scenarioPath = writeHarnessPlan(dir, "plan.yaml");
 
     const { chunks, restore } = installStderrCapture();
@@ -152,7 +152,7 @@ describe("main anthropic auth preflight", () => {
       stderr: "",
       error: undefined,
     });
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-cli-auth-cache-run-"));
+    const dir = makeTempDir("cli-auth-cache-run");
     const scenarioPath = writeHarnessPlan(dir, "plan.yaml");
 
     yield* main([

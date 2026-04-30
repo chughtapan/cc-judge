@@ -29,11 +29,12 @@ import {
 import { RunId } from "../src/core/types.js";
 import { itEffect } from "./support/effect.js";
 import { captureStream } from "./support/streams.js";
+import { makeTempDir } from "./support/tmpdir.js";
 
 // ── Test fixture helpers ────────────────────────────────────────────────────
 
 function mkTmpResultsDir(tag: string): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `cc-judge-wal-${tag}-`));
+  return makeTempDir(`wal-${tag}`);
 }
 
 function readJsonl(file: string): ReadonlyArray<WalLine> {

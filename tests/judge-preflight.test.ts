@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import * as os from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { makeTempDir } from "./support/tmpdir.js";
 
 const { spawnSyncMock } = vi.hoisted(() => ({
   spawnSyncMock: vi.fn(),
@@ -24,7 +24,7 @@ import { captureEnvVar, deleteEnvVar, restoreEnvVar, setEnvVar } from "./support
 let currentXdgCacheHome: string | null = null;
 
 function installXdgCacheHome(): string {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "cc-judge-auth-cache-"));
+  const dir = makeTempDir("auth-cache");
   setEnvVar("XDG_CACHE_HOME", dir);
   currentXdgCacheHome = dir;
   return dir;
