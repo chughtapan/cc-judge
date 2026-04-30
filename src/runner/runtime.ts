@@ -9,9 +9,9 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { computeDiff, parseStreamJson, walkWorkspace } from "./helpers.js";
 import {
   AgentRunTimeoutError,
   AgentStartError,
@@ -26,7 +26,6 @@ import type {
   Turn,
   WorkspaceDiff,
   WorkspaceFile,
-  WorkspaceFileChange,
 } from "../core/types.js";
 
 const DEFAULT_CLAUDE_ARGS: ReadonlyArray<string> = ["-p", "--output-format", "stream-json", "--verbose"];
@@ -74,29 +73,6 @@ export interface SubprocessRuntimeOpts {
   readonly cwd?: string;
   readonly env?: Readonly<Record<string, string>>;
   readonly extraArgs?: ReadonlyArray<string>;
-}
-
-interface ParsedTurn {
-  readonly response: string;
-  readonly toolCallCount: number;
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheReadTokens: number;
-  readonly cacheWriteTokens: number;
-}
-
-interface StreamJsonEvent {
-  readonly type?: unknown;
-  readonly content?: unknown;
-  readonly result?: unknown;
-  readonly usage?: unknown;
-}
-
-interface StreamJsonUsage {
-  readonly input_tokens?: unknown;
-  readonly output_tokens?: unknown;
-  readonly cache_read_input_tokens?: unknown;
-  readonly cache_creation_input_tokens?: unknown;
 }
 
 interface PreparedImage {
@@ -802,149 +778,6 @@ function createDockerContainer(
       }).pipe(Effect.as(container.id)),
     ),
   );
-}
-
-function parseStreamJson(stdout: string): ParsedTurn {
-  let response = "";
-  let toolCallCount = 0;
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cacheReadTokens = 0;
-  let cacheWriteTokens = 0;
-  let sawStructured = false;
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
-      continue;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch (error) {
-      void error;
-      continue;
-    }
-    if (typeof parsed !== "object" || parsed === null) {
-      continue;
-    }
-    sawStructured = true;
-    const obj: StreamJsonEvent = parsed;
-    const type = typeof obj.type === "string" ? obj.type : "";
-    switch (type) {
-      case "assistant":
-        if (typeof obj.content === "string") {
-          response += obj.content;
-        }
-        break;
-      case "result":
-        if (typeof obj.result === "string" && response.length === 0) {
-          response = obj.result;
-        }
-        break;
-      case "tool_use":
-      case "tool_call":
-        toolCallCount += 1;
-        break;
-      default:
-        break;
-    }
-    const usage = obj.usage;
-    if (typeof usage === "object" && usage !== null) {
-      const tokens: StreamJsonUsage = usage;
-      if (typeof tokens.input_tokens === "number") {
-        inputTokens += tokens.input_tokens;
-      }
-      if (typeof tokens.output_tokens === "number") {
-        outputTokens += tokens.output_tokens;
-      }
-      if (typeof tokens.cache_read_input_tokens === "number") {
-        cacheReadTokens += tokens.cache_read_input_tokens;
-      }
-      if (typeof tokens.cache_creation_input_tokens === "number") {
-        cacheWriteTokens += tokens.cache_creation_input_tokens;
-      }
-    }
-  }
-  if (!sawStructured) {
-    response = stdout;
-  }
-  return {
-    response,
-    toolCallCount,
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
-  };
-}
-
-function walkWorkspace(dir: string): Effect.Effect<ReadonlyMap<string, string>, never, never> {
-  const output = new Map<string, string>();
-  return walkInto(dir, dir, output).pipe(Effect.map(() => output as ReadonlyMap<string, string>));
-}
-
-function walkInto(
-  root: string,
-  currentDir: string,
-  output: Map<string, string>,
-): Effect.Effect<void, never, never> {
-  return Effect.tryPromise({
-    try: () => readdir(currentDir, { withFileTypes: true }),
-    catch: () => [],
-  }).pipe(
-    Effect.catchAll(() => Effect.succeed([])),
-    Effect.flatMap((entries) =>
-      Effect.forEach(
-        entries,
-        (entry) => {
-          const absolutePath = path.join(currentDir, entry.name);
-          if (entry.isDirectory()) {
-            return walkInto(root, absolutePath, output);
-          }
-          if (!entry.isFile()) {
-            return Effect.void;
-          }
-          return Effect.tryPromise({
-            try: () => readFile(absolutePath, "utf8"),
-            catch: () => null,
-          }).pipe(
-            Effect.match({
-              onFailure: () => undefined,
-              onSuccess: (content: string | null) => {
-                if (content !== null) {
-                  output.set(path.relative(root, absolutePath), content);
-                }
-              },
-            }),
-          );
-        },
-        { discard: true },
-      ),
-    ),
-  );
-}
-
-function computeDiff(
-  baseline: ReadonlyMap<string, string>,
-  current: ReadonlyMap<string, string>,
-): WorkspaceDiff {
-  const changed: WorkspaceFileChange[] = [];
-  const seen = new Set<string>();
-  for (const [relativePath, before] of baseline) {
-    seen.add(relativePath);
-    const after = current.get(relativePath);
-    if (after === undefined) {
-      changed.push({ path: relativePath, before, after: null });
-    } else if (after !== before) {
-      changed.push({ path: relativePath, before, after });
-    }
-  }
-  for (const [relativePath, after] of current) {
-    if (!seen.has(relativePath)) {
-      changed.push({ path: relativePath, before: null, after });
-    }
-  }
-  return { changed };
 }
 
 function dockerImageExists(image: string): Effect.Effect<boolean, never, never> {
