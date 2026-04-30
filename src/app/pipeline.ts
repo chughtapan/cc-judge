@@ -356,6 +356,10 @@ function scoreOneBundle(
   });
 }
 
+// Synthetic judge label used when the coordinator failed before the real
+// judge could observe the run. Tests assert on this constant.
+export const DETERMINISTIC_JUDGE_MODEL = "deterministic/coordinator";
+
 function coordinationFailureRecordInput(
   plan: RunPlan,
   error: RunCoordinationError,
@@ -380,10 +384,6 @@ function coordinationFailureRecordInput(
     latencyMs,
   };
 }
-
-// Synthetic judge label used when the coordinator failed before the real
-// judge could observe the run. Tests assert on this constant.
-export const DETERMINISTIC_JUDGE_MODEL = "deterministic/coordinator";
 
 function coordinationFailureBundle(
   plan: RunPlan,
