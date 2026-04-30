@@ -775,7 +775,10 @@ function createDockerContainer(
     HostConfig: {
       Binds: [`${workspaceDir}:/workspace`],
       NetworkMode: opts.network ?? "none",
-      AutoRemove: true,
+      // No AutoRemove: stop() handles removal explicitly via dockerode's
+      // synchronous remove(). AutoRemove triggers daemon-side async cleanup
+      // that races with our remove() call, leaving stop() callers unable
+      // to assume the container is gone when stop() resolves.
       ...(opts.memoryMb !== undefined ? { Memory: opts.memoryMb * 1024 * 1024 } : {}),
       ...(opts.cpus !== undefined ? { NanoCpus: Math.round(opts.cpus * 1_000_000_000) } : {}),
     },
