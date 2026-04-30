@@ -214,28 +214,66 @@ describe("WAL invariant #12 (errors swallowed on hot path)", () => {
     },
   );
 
-  itEffect("fs failures on the hot path are swallowed; run continues", function* () {
+  itEffect("fs failures on the hot path are swallowed AND warn on stderr", function* () {
     // Pre-stage a DIRECTORY at the path where the WAL file should live.
     // `fs.appendFileSync` will throw EISDIR when it tries to open the
     // path for writing — exercises the same try/catch swallow branch
     // that a real ENOSPC would hit, without needing to mock a sealed
     // ESM export.
+    //
+    // Spec (j) for #75: ENOSPC swallow + structured warning. This test
+    // asserts both halves: invariant #12 (Effect succeeds) and the
+    // observability contract (operator sees the failure on stderr).
+    // Closes follow-up issue #92.
     const resultsDir = mkTmpResultsDir("enospc");
     const paths = walPathsFromResultsDir(resultsDir);
     fs.mkdirSync(paths.inflightDir, { recursive: true });
     fs.mkdirSync(path.join(paths.inflightDir, `${TEST_RUN_ID_ENOSPC}.jsonl`));
 
-    const exit = yield* Effect.exit(Effect.scoped(Effect.gen(function* () {
-      const handle = yield* openRunLog(TEST_RUN_ID_ENOSPC, paths);
-      yield* handle.append({ kind: WAL_LINE_KIND.Event, payload: { a: 1 } });
-      yield* handle.append({ kind: WAL_LINE_KIND.Event, payload: { a: 2 } });
-      yield* handle.close({ status: RUN_CLOSE_STATUS.Completed });
-    })));
-    // The Effect MUST succeed (invariant #12): fs failures are warned
-    // and swallowed, never surface as a Cause.
+    const stderr = captureStream(process.stderr);
+    let exit;
+    try {
+      exit = yield* Effect.exit(Effect.scoped(Effect.gen(function* () {
+        const handle = yield* openRunLog(TEST_RUN_ID_ENOSPC, paths);
+        yield* handle.append({ kind: WAL_LINE_KIND.Event, payload: { a: 1 } });
+        yield* handle.append({ kind: WAL_LINE_KIND.Event, payload: { a: 2 } });
+        yield* handle.close({ status: RUN_CLOSE_STATUS.Completed });
+      })));
+    } finally {
+      stderr.restore();
+    }
     expect(exit._tag).toBe("Success");
-    // avoid unused-import warning on vi when the spy path is unused
-    expect(vi).toBeDefined();
+
+    type WalWarnLine = {
+      readonly source?: unknown;
+      readonly event?: unknown;
+      readonly runId?: unknown;
+    };
+
+    const warnings = stderr.chunks
+      .map((line): WalWarnLine | null => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line.trim());
+        } catch (parseErr) {
+          void parseErr;
+          return null;
+        }
+        if (typeof parsed !== "object" || parsed === null) return null;
+        return parsed as WalWarnLine;
+      })
+      .filter(
+        (w): w is WalWarnLine =>
+          w !== null && w.source === "cc-judge:wal" && w.runId === TEST_RUN_ID_ENOSPC,
+      );
+
+    // At minimum: each failed append + the close-time fsync/outcome write
+    // each produce a structured warning. Don't pin the count (it depends on
+    // which sub-step trips first); just assert the operator sees it AND that
+    // append.failed is among the warned events.
+    expect(warnings.length).toBeGreaterThan(0);
+    const events = warnings.map((w) => w.event);
+    expect(events).toContain("append.failed");
   });
 });
 
