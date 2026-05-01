@@ -61,6 +61,21 @@ interface RunSubprocessScenariosBaseOpts
   readonly harness?: ExecutionHarness;
 }
 
+/**
+ * Discriminated union: either provide a `bin` path (helper builds the default
+ * `SubprocessRuntime`) or provide a custom `runtime` that is subprocess-
+ * equivalent. Custom runtimes must tolerate the synthesized agent artifact:
+ * during the PR-1 transition the helper emits a `DockerImageArtifact` stub,
+ * and after cc-judge#254 lands it emits a `SubprocessArtifact`. A runtime
+ * that materializes Docker images from the artifact (e.g. `DockerRuntime`)
+ * is not a valid drop-in here; that is what `runPlans` is for.
+ *
+ * Setting `runtimeOpts.cwd` reroutes the subprocess to a directory other
+ * than the per-scenario tmpdir, which makes `scenario.workspace` invisible
+ * to the agent and decouples the captured `workspaceDiff` from the
+ * subprocess's actual edits. Avoid `cwd` unless the embedder is also
+ * supplying its own workspace seeding via plan metadata.
+ */
 type RuntimeSelector =
   | {
       readonly bin: string;
