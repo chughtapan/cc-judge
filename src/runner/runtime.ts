@@ -30,6 +30,26 @@ import type {
 
 const DEFAULT_CLAUDE_ARGS: ReadonlyArray<string> = ["-p", "--output-format", "stream-json", "--verbose"];
 
+// Subprocess permission-mode threading (spec § 5 PR 2 / § 7.3). Without
+// `--permission-mode` in the spawn args, the spawned `claude` CLI blocks
+// on the first tool-permission prompt with no stdin to answer (Invariant
+// I3). Default `acceptEdits` lets the agent edit the workspace it owns
+// without prompting; embedders override per invocation via `permissionMode`
+// on opts, or per-flag via an explicit `--permission-mode` token in
+// `extraArgs` (Invariant I4).
+export const SUBPROCESS_PERMISSION_MODES = [
+  "acceptEdits",
+  "bypassPermissions",
+  "plan",
+  "default",
+] as const;
+
+export type SubprocessPermissionMode = (typeof SUBPROCESS_PERMISSION_MODES)[number];
+
+export const DEFAULT_SUBPROCESS_PERMISSION_MODE: SubprocessPermissionMode = "acceptEdits";
+
+const SUBPROCESS_PERMISSION_FLAG = "--permission-mode";
+
 // One Docker client per process. Defaults to the local socket
 // (/var/run/docker.sock on POSIX, named pipe on Windows). All Docker
 // lifecycle operations — build, pull, inspect, create, kill, remove —
@@ -73,6 +93,7 @@ export interface SubprocessRuntimeOpts {
   readonly cwd?: string;
   readonly env?: Readonly<Record<string, string>>;
   readonly extraArgs?: ReadonlyArray<string>;
+  readonly permissionMode?: SubprocessPermissionMode;
 }
 
 interface PreparedImage {
@@ -380,6 +401,19 @@ function runDockerPrompt(
     });
   }
 
+// Compose the subprocess argv. Falls back to DEFAULT_CLAUDE_ARGS when
+// the embedder supplied none, then injects `--permission-mode <mode>`
+// only if the base args have no explicit `--permission-mode` token —
+// preserving Invariant I4 against double-injection.
+function buildSubprocessArgs(opts: SubprocessRuntimeOpts, prompt: string): ReadonlyArray<string> {
+  const baseArgs = opts.extraArgs ?? DEFAULT_CLAUDE_ARGS;
+  if (baseArgs.includes(SUBPROCESS_PERMISSION_FLAG)) {
+    return [...baseArgs, prompt];
+  }
+  const mode = opts.permissionMode ?? DEFAULT_SUBPROCESS_PERMISSION_MODE;
+  return [...baseArgs, SUBPROCESS_PERMISSION_FLAG, mode, prompt];
+}
+
 function runSubprocessPrompt(
   plan: RunPlan,
   agent: AgentDeclaration,
@@ -390,7 +424,7 @@ function runSubprocessPrompt(
   timeoutMs: number,
   abortSignal?: AbortSignal,
 ): Effect.Effect<Turn, AgentRunTimeoutError | HarnessExecutionError, never> {
-  const args = [...(opts.extraArgs ?? DEFAULT_CLAUDE_ARGS), prompt];
+  const args = buildSubprocessArgs(opts, prompt);
   // Runtime boundary: inherit the host environment unless the caller supplied one.
   // eslint-disable-next-line agent-code-guard/no-process-env-at-runtime
   const env = opts.env !== undefined ? { ...process.env, ...opts.env } : process.env;
