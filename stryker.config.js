@@ -12,12 +12,10 @@ export default {
   incremental: true,
   incrementalFile: '.stryker-tmp/incremental.json',
   concurrency: 4,
-  // break: null lifted in v0.0.3 because the typed-cause-tag refactor
-  // dropped CI mutation score from 49.37 → 47.97 (we removed string-pinning
-  // assertions in test bodies). The follow-up branch restores break=50 by
-  // adding dedicated formatter+constants tests (already drafted in stash:
-  // tests/inspect-formatter.test.ts, tests/judge-preflight-formatter.test.ts,
-  // tests/constants.test.ts). Tracked as the immediate next sub-task.
-  thresholds: { high: 80, low: 60, break: null },
+  // Default 5min dryRunTimeout was too tight when the suite grew past 400
+  // tests with PBT — Stryker's cold start (instrumentation + checker +
+  // first vitest spin-up) needs more headroom than the test suite itself.
+  dryRunTimeoutMinutes: 15,
+  thresholds: { high: 80, low: 60, break: 50 },
   reporters: ['clear-text', 'html', 'progress'],
 };

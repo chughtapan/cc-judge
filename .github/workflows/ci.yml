@@ -23,21 +23,22 @@ jobs:
       - run: pnpm test
       - run: pnpm build
 
-  mutation:
-    # Runs incremental mutation testing against the committed
-    # .stryker-tmp/incremental.json baseline. PRs only pay the cost of
-    # re-running mutants in files they touched; the baseline is refreshed
-    # by landing a new incremental.json from a full local run when needed.
-    # Re-enabled after epic #37 raised the score above the break threshold.
+  mutation-baseline:
+    # CI does NOT run Stryker. Mutation testing is a 25+ minute job and
+    # the incremental cache lives on the developer's machine. Contributors
+    # run `pnpm mutation` locally — Stryker enforces the break threshold
+    # there — and commit the refreshed .stryker-tmp/incremental.json.
+    # CI only verifies the baseline was refreshed when src changed, so
+    # the next contributor's incremental run starts from a fresh cache.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          fetch-depth: 0  # full history so the script can diff vs origin/main
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm mutation
+      - name: Verify mutation baseline is fresh
+        env:
+          BASE_REF: origin/${{ github.base_ref || 'main' }}
+        run: bash scripts/check-mutation-baseline.sh
