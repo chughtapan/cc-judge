@@ -71,11 +71,17 @@ export type ExecutionArtifact =
       readonly _tag: "DockerImageArtifact";
       readonly image: string;
       readonly pullPolicy?: "always" | "if-missing" | "never";
+    }
+  // Metadata-only marker; operational opts live on SubprocessRuntimeOpts.
+  | {
+      readonly _tag: "SubprocessArtifact";
+      readonly label?: string;
     };
 
 export const EXECUTION_ARTIFACT_TAG = {
   DockerBuildArtifact: "DockerBuildArtifact",
   DockerImageArtifact: "DockerImageArtifact",
+  SubprocessArtifact: "SubprocessArtifact",
 } as const satisfies { readonly [K in ExecutionArtifact["_tag"]]: K };
 
 export interface AgentDeclaration {

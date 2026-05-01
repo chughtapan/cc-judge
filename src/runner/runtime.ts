@@ -543,7 +543,25 @@ function materializeImage(
       return buildDockerImage(agent, plan);
     case "DockerImageArtifact":
       return ensureDockerImage(agent, plan);
+    case "SubprocessArtifact":
+      return Effect.fail(invalidArtifactForDocker(agent, plan));
   }
+}
+
+// Wrong-runtime tag in the Docker materialization path; surfaced as
+// ImageMissing with an `invalid-artifact:<tag>` sentinel image so callers
+// see one cause shape regardless of which guard fires.
+function invalidArtifactForDocker(
+  agent: AgentDeclaration,
+  plan: RunPlan,
+): AgentStartError {
+  return new AgentStartError({
+    scenarioId: plan.scenarioId,
+    agentId: agent.id,
+    cause: AgentStartErrorCause.ImageMissing({
+      image: `invalid-artifact:${agent.artifact._tag}`,
+    }),
+  });
 }
 
 function buildDockerImage(
@@ -676,15 +694,7 @@ function ensureDockerImage(
 ): Effect.Effect<PreparedImage, AgentStartError, never> {
   const artifact = agent.artifact;
   if (artifact._tag !== "DockerImageArtifact") {
-    return Effect.fail(
-      new AgentStartError({
-        scenarioId: plan.scenarioId,
-        agentId: agent.id,
-        cause: AgentStartErrorCause.ImageMissing({
-          image: `invalid-artifact:${artifact._tag}`,
-        }),
-      }),
-    );
+    return Effect.fail(invalidArtifactForDocker(agent, plan));
   }
   const image = artifact.image;
   const pullPolicy = artifact.pullPolicy ?? "if-missing";

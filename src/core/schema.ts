@@ -91,6 +91,10 @@ export const ExecutionArtifactSchema = Type.Union([
       ]),
     ),
   }),
+  Type.Object({
+    _tag: Type.Literal("SubprocessArtifact"),
+    label: Type.Optional(Type.String({ minLength: 1 })),
+  }),
 ]);
 
 export const AgentDeclarationSchema = Type.Object({
