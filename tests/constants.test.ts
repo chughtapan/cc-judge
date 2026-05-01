@@ -92,6 +92,7 @@ describe("typed cause-tag / kind constants — value pins", () => {
     expect(EXECUTION_ARTIFACT_TAG).toEqual({
       DockerBuildArtifact: "DockerBuildArtifact",
       DockerImageArtifact: "DockerImageArtifact",
+      SubprocessArtifact: "SubprocessArtifact",
     });
   });
 
