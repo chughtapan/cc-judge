@@ -175,6 +175,7 @@ function buildBundleRecord(params: {
     cacheWriteTokens: agg.cacheWriteTokens,
     transcriptPath: "",
     workspaceDiffSummary: summary,
+    ...(params.judge.failureKind !== undefined ? { failureKind: params.judge.failureKind } : {}),
   };
 }
 
@@ -356,6 +357,10 @@ function scoreOneBundle(
   });
 }
 
+// Synthetic judge label used when the coordinator failed before the real
+// judge could observe the run. Tests assert on this constant.
+export const DETERMINISTIC_JUDGE_MODEL = "deterministic/coordinator";
+
 function coordinationFailureRecordInput(
   plan: RunPlan,
   error: RunCoordinationError,
@@ -375,7 +380,7 @@ function coordinationFailureRecordInput(
   return {
     bundle: coordinationFailureBundle(plan, error, outcomes),
     judge,
-    judgeModel: "deterministic/coordinator",
+    judgeModel: DETERMINISTIC_JUDGE_MODEL,
     startedAt,
     latencyMs,
   };

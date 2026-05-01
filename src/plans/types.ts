@@ -57,6 +57,12 @@ export type HarnessPlanErrorCause =
       readonly message: string;
     };
 
+export const HARNESS_PLAN_CAUSE = {
+  InvalidPayload: "InvalidPayload",
+  InvalidConfiguration: "InvalidConfiguration",
+  ImplementationFailure: "ImplementationFailure",
+} as const satisfies { readonly [K in HarnessPlanErrorCause["_tag"]]: K };
+
 export interface HarnessPlanLoadArgs {
   readonly sourcePath: PlanFilePath;
   readonly plan: SharedHarnessPlanIdentity;

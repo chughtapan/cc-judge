@@ -67,6 +67,9 @@ export class BraintrustEmitter implements ObservabilityEmitter {
             inputTokens: event.record.inputTokens,
             outputTokens: event.record.outputTokens,
             overallSeverity: event.record.overallSeverity ?? "none",
+            ...(event.record.failureKind !== undefined && event.record.failureKind !== null
+              ? { failureKind: event.record.failureKind }
+              : {}),
           },
         });
       } catch (err) {

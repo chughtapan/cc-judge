@@ -12,8 +12,9 @@ import { describe, expect } from "vitest";
 import { Effect } from "effect";
 import { existsSync } from "node:fs";
 import { SubprocessRuntime } from "../src/runner/index.js";
+import { AGENT_START_CAUSE } from "../src/core/errors.js";
 import { AgentId, ProjectId, ScenarioId } from "../src/core/types.js";
-import { itEffect, expectLeft } from "./support/effect.js";
+import { itEffect, expectLeft, expectCauseTag } from "./support/effect.js";
 
 describe("SubprocessRuntime", () => {
   itEffect(
@@ -43,7 +44,7 @@ describe("SubprocessRuntime", () => {
 
       const result = yield* Effect.either(runtime.prepare(agent, plan));
       const error = expectLeft(result);
-      expect(error.cause._tag).toBe("BinaryNotFound");
+      expectCauseTag(error.cause, AGENT_START_CAUSE.BinaryNotFound);
     },
   );
 

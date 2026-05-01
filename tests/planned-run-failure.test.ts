@@ -9,7 +9,7 @@ vi.mock("node:crypto", () => ({
   randomUUID: randomUUIDMock,
 }));
 import { Effect } from "effect";
-import { runWithHarness } from "../src/app/pipeline.js";
+import { DETERMINISTIC_JUDGE_MODEL, runWithHarness } from "../src/app/pipeline.js";
 import {
   AgentStartErrorCause,
   HarnessExecutionCause,
@@ -18,6 +18,7 @@ import {
 } from "../src/core/errors.js";
 import type { JudgeBackend } from "../src/judge/index.js";
 import {
+  AGENT_LIFECYCLE_STATUS,
   AgentId,
   ProjectId,
   ScenarioId,
@@ -25,6 +26,9 @@ import {
   type RunPlan,
 } from "../src/core/types.js";
 import { itEffect } from "./support/effect.js";
+
+const ALPHA_ID = "alpha";
+const BETA_ID = "beta";
 
 function makePlan(): RunPlan {
   const agents: readonly [AgentDeclaration, AgentDeclaration] = [
@@ -94,9 +98,9 @@ describe("runWithHarness failure folding", () => {
 
     expect(judgeCalled).toBe(false);
     expect(report.summary.failed).toBe(1);
-    expect(report.runs[0]?.judgeModel).toBe("deterministic/coordinator");
-    expect(report.runs[0]?.reason).toContain("alpha failed_to_start");
-    expect(report.runs[0]?.reason).toContain("beta cancelled");
+    expect(report.runs[0]?.judgeModel).toBe(DETERMINISTIC_JUDGE_MODEL);
+    expect(report.runs[0]?.reason).toContain(`${ALPHA_ID} ${AGENT_LIFECYCLE_STATUS.FailedToStart}`);
+    expect(report.runs[0]?.reason).toContain(`${BETA_ID} ${AGENT_LIFECYCLE_STATUS.Cancelled}`);
   });
 
   itEffect("preserves cancelled status when the run is aborted", function* () {
@@ -130,9 +134,9 @@ describe("runWithHarness failure folding", () => {
     });
 
     expect(report.summary.failed).toBe(1);
-    expect(report.runs[0]?.reason).toContain("alpha cancelled");
-    expect(report.runs[0]?.reason).toContain("beta cancelled");
-    expect(report.runs[0]?.reason).not.toContain("runtime_error");
+    expect(report.runs[0]?.reason).toContain(`${ALPHA_ID} ${AGENT_LIFECYCLE_STATUS.Cancelled}`);
+    expect(report.runs[0]?.reason).toContain(`${BETA_ID} ${AGENT_LIFECYCLE_STATUS.Cancelled}`);
+    expect(report.runs[0]?.reason).not.toContain(AGENT_LIFECYCLE_STATUS.RuntimeError);
   });
 
   itEffect("uses a unique runId for each deterministic failure bundle", function* () {

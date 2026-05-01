@@ -5,9 +5,12 @@ import { itEffect, EITHER_LEFT } from "./support/effect.js";
 
 describe("bundleAutoCodec", () => {
   itEffect("decodes a normalized YAML bundle", function* () {
+    const runId = "bundle-run-1";
+    const project = "cc-judge";
+    const agentId = "agent-1";
     const payload = [
-      "runId: bundle-run-1",
-      "project: cc-judge",
+      `runId: ${runId}`,
+      `project: ${project}`,
       "scenarioId: bundle-scenario",
       "name: bundle",
       "description: normalized bundle",
@@ -16,19 +19,19 @@ describe("bundleAutoCodec", () => {
       "  validationChecks:",
       "    - bundle reaches the judge",
       "agents:",
-      "  - id: agent-1",
+      `  - id: ${agentId}`,
       "    name: Agent One",
       "outcomes:",
-      "  - agentId: agent-1",
+      `  - agentId: ${agentId}`,
       "    status: completed",
       "    endedAt: 2026-04-19T00:01:40.000Z",
     ].join("\n");
 
     const bundle = yield* bundleAutoCodec.decode(payload, "mem://bundle.yaml");
 
-    expect(bundle.runId).toBe("bundle-run-1");
-    expect(bundle.project).toBe("cc-judge");
-    expect(bundle.outcomes[0]?.agentId).toBe("agent-1");
+    expect(bundle.runId).toBe(runId);
+    expect(bundle.project).toBe(project);
+    expect(bundle.outcomes[0]?.agentId).toBe(agentId);
   });
 
   itEffect("rejects malformed bundles", function* () {

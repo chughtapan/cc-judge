@@ -123,35 +123,51 @@ export function judgeBundle(
   return backend.judge(bundleToJudgeInput(bundle, abortSignal));
 }
 
+// Stable user-visible strings in the rendered prompt — exported so tests
+// can assert on structure (toContain) without hardcoding message strings.
+
+export const PROMPT_HEADING = {
+  EvaluationTarget: "# Evaluation target:",
+  DescriptionLine: "Description:",
+  ExpectedBehaviorLine: "Expected behavior:",
+  ValidationChecks: "Validation checks (each must hold for pass=true):",
+  Agents: "# Agents",
+  EventTimeline: "# Event timeline",
+  Transcript: "# Transcript",
+  WorkspaceDiff: "# Workspace diff",
+  Context: "# Context",
+  Trailer: "Return the JSON verdict now.",
+} as const;
+
 function renderPrompt(input: JudgeInput): string {
   const target = input.target;
   const checks = target.requirements.validationChecks.map((c, i) => `${i + 1}. ${c}`).join("\n");
   const sections: string[] = [
-    `# Evaluation target: ${target.name}`,
-    `Description: ${target.description}`,
-    `Expected behavior: ${target.requirements.expectedBehavior}`,
+    `${PROMPT_HEADING.EvaluationTarget} ${target.name}`,
+    `${PROMPT_HEADING.DescriptionLine} ${target.description}`,
+    `${PROMPT_HEADING.ExpectedBehaviorLine} ${target.requirements.expectedBehavior}`,
     "",
-    "Validation checks (each must hold for pass=true):",
+    PROMPT_HEADING.ValidationChecks,
     checks,
   ];
 
   if (input.agents !== undefined && input.agents.length > 0) {
-    sections.push("", "# Agents", renderAgents(input.agents));
+    sections.push("", PROMPT_HEADING.Agents, renderAgents(input.agents));
   }
 
   if (input.events !== undefined && input.events.length > 0) {
-    sections.push("", "# Event timeline", renderEvents(input.events));
+    sections.push("", PROMPT_HEADING.EventTimeline, renderEvents(input.events));
   } else {
-    sections.push("", "# Transcript", renderTurns(input.turns));
+    sections.push("", PROMPT_HEADING.Transcript, renderTurns(input.turns));
   }
 
-  sections.push("", "# Workspace diff", renderDiff(input.workspaceDiff));
+  sections.push("", PROMPT_HEADING.WorkspaceDiff, renderDiff(input.workspaceDiff));
 
   if (input.context !== undefined && Object.keys(input.context).length > 0) {
-    sections.push("", "# Context", JSON.stringify(input.context, null, 2));
+    sections.push("", PROMPT_HEADING.Context, JSON.stringify(input.context, null, 2));
   }
 
-  sections.push("", "Return the JSON verdict now.");
+  sections.push("", PROMPT_HEADING.Trailer);
   return sections.join("\n");
 }
 
@@ -378,6 +394,7 @@ function criticalFallback(
     issues,
     overallSeverity: "critical",
     retryCount,
+    failureKind: err.kind,
   };
 }
 

@@ -115,6 +115,14 @@ export const RunnerResolutionCause = Data.taggedEnum<RunnerResolutionCause>();
 export const ERROR_TAG = {
   AgentStartError: "AgentStartError",
   AgentRunTimeoutError: "AgentRunTimeoutError",
+  TotalTimeoutExceeded: "TotalTimeoutExceeded",
+  TraceDecodeError: "TraceDecodeError",
+  BundleDecodeError: "BundleDecodeError",
+  BundleBuildError: "BundleBuildError",
+  HarnessExecutionError: "HarnessExecutionError",
+  RunCoordinationError: "RunCoordinationError",
+  PublishError: "PublishError",
+  RunnerResolutionError: "RunnerResolutionError",
 } as const;
 
 export const AGENT_START_CAUSE = {
@@ -127,3 +135,43 @@ export const AGENT_START_CAUSE = {
   WorkspacePathEscape: "WorkspacePathEscape",
   WorkspaceSetupFailed: "WorkspaceSetupFailed",
 } as const satisfies { readonly [K in AgentStartErrorCause["_tag"]]: K };
+
+export const BUNDLE_BUILD_CAUSE = {
+  DuplicateOutcome: "DuplicateOutcome",
+  MissingOutcomes: "MissingOutcomes",
+  UnknownAgent: "UnknownAgent",
+  EventOrderViolation: "EventOrderViolation",
+  SchemaInvalid: "SchemaInvalid",
+} as const satisfies { readonly [K in BundleBuildCause["_tag"]]: K };
+
+export const BUNDLE_DECODE_CAUSE = {
+  UnknownFormat: "UnknownFormat",
+  SchemaInvalid: "SchemaInvalid",
+} as const satisfies { readonly [K in BundleDecodeCause["_tag"]]: K };
+
+export const HARNESS_EXECUTION_CAUSE = {
+  MissingRuntimeHandle: "MissingRuntimeHandle",
+  InvalidPlanMetadata: "InvalidPlanMetadata",
+  ExecutionFailed: "ExecutionFailed",
+} as const satisfies { readonly [K in HarnessExecutionCause["_tag"]]: K };
+
+export const PUBLISH_ERROR_CAUSE = {
+  GhCliMissing: "GhCliMissing",
+  GhCliFailed: "GhCliFailed",
+  BodyTooLarge: "BodyTooLarge",
+} as const satisfies { readonly [K in PublishErrorCause["_tag"]]: K };
+
+export const RUN_COORDINATION_CAUSE = {
+  AgentStartFailed: "AgentStartFailed",
+  HarnessFailed: "HarnessFailed",
+  BundleBuildFailed: "BundleBuildFailed",
+} as const satisfies { readonly [K in RunCoordinationCause["_tag"]]: K };
+
+export const RUNNER_RESOLUTION_CAUSE = {
+  InvalidRuntime: "InvalidRuntime",
+} as const satisfies { readonly [K in RunnerResolutionCause["_tag"]]: K };
+
+export const TRACE_DECODE_CAUSE = {
+  UnknownFormat: "UnknownFormat",
+  SchemaInvalid: "SchemaInvalid",
+} as const satisfies { readonly [K in TraceDecodeCause["_tag"]]: K };
