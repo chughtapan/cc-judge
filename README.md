@@ -57,6 +57,46 @@ eval-results/
     <scenario-id>.<run-number>.yaml
 ```
 
+## Quickstart (subprocess SDK)
+
+For embedders running the local Claude binary as a subprocess, `runSubprocessScenarios` pre-composes the four-component default stack — `SubprocessRuntime` + `PromptWorkspaceHarness` + `AnthropicJudgeBackend` + the default `ReportEmitter`:
+
+```ts
+import { Effect } from "effect";
+import {
+  runSubprocessScenarios,
+  ProjectId,
+  ScenarioId,
+} from "@moltzap/cc-judge";
+
+const scenarios = [
+  {
+    project: ProjectId("moltzap"),
+    scenarioId: ScenarioId("hello"),
+    name: "First-contact response",
+    description: "Verify the agent responds coherently to a first DM.",
+    requirements: {
+      expectedBehavior: "agent returns non-empty, on-topic text",
+      validationChecks: ["Response is non-empty", "Stays on topic"],
+    },
+    prompts: ["Hello, can you explain how MoltZap conversations work?"] as const,
+  },
+];
+
+const report = await Effect.runPromise(
+  runSubprocessScenarios(scenarios, { bin: "/usr/local/bin/claude" }),
+);
+```
+
+Override hooks for the four components:
+
+- `concurrency: 4` — run scenarios in parallel (default `1`).
+- `judgeOpts: { model: "claude-opus-4-7" }` — tune the bundled `AnthropicJudgeBackend`; or pass `judge: customJudge` to swap the backend wholesale.
+- `runtimeOpts: { extraArgs: ["--verbose"] }` — extend the default `SubprocessRuntime`; or pass `runtime: customRuntime` to swap it out (mutually exclusive with `bin` at the type level).
+- `harness: customHarness` — share one `ExecutionHarness` across every scenario in the batch (escape hatch when prompts are uniform or the override harness reads prompts from plan metadata; the per-scenario `prompts`/`workspace`/`turnTimeoutMs` are ignored when this is set).
+
+Reports land at `./eval-results/summary.md` and `./eval-results/results.jsonl`; override the directory via `resultsDir`. Per-scenario coordination failures fold into individual `RunRecord`s with `pass: false`; sibling scenarios continue to run.
+
 ## Harness Modules
 
 The plan's `harness.module` path resolves relative to the plan file. The module must export `load(args)` as its default export unless the plan sets `harness.export`.
