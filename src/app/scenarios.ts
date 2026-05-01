@@ -29,7 +29,6 @@ export interface SubprocessScenario {
   readonly turnTimeoutMs?: number;
   readonly agentId?: AgentId;
   readonly agentName?: string;
-  readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
 interface RunSubprocessScenariosBaseOpts
