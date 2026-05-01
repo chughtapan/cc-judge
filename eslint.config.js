@@ -58,6 +58,24 @@ export default [
     rules: guard.configs.integrationTests.rules,
   },
 
+  // Block 4: dedicated formatter and constants tests are EXPLICITLY allowed
+  // to assert on user-facing message strings. The whole point of these
+  // files is to pin the CLI/output contract that the rest of the suite
+  // (which asserts structurally on tags / report shapes) deliberately
+  // leaves uncovered. Disabling no-hardcoded-assertion-literals here is
+  // not a leak — it's the principled split.
+  {
+    files: [
+      "tests/inspect-formatter.test.ts",
+      "tests/judge-preflight-formatter.test.ts",
+      "tests/constants.test.ts",
+    ],
+    plugins: { "agent-code-guard": guard },
+    rules: {
+      "agent-code-guard/no-hardcoded-assertion-literals": "off",
+    },
+  },
+
   {
     ignores: [
       "dist/**",
